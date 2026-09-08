@@ -1664,7 +1664,7 @@ git commit -m "feat: OpenAI LLM 클라이언트와 구조화 출력 스키마 �
 - Test: `src/common/utils/cosine.spec.ts`, `src/infrastructure/llm/embedding.client.spec.ts`
 
 **Interfaces:**
-- Consumes: `ConfigService` (Task 1), `mapWithConcurrency` (Task 4)
+- Consumes: `ConfigService` (Task 1)
 - Produces:
   - `cosineSimilarity(a: number[], b: number[]): number`
   - `meanPairwiseDistance(vectors: number[][]): number` — 답변 분산도. 벡터가 2개 미만이면 0.
