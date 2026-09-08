@@ -3,10 +3,13 @@ import {
   CreateDateColumn,
   Entity,
   Index,
+  JoinColumn,
+  ManyToOne,
   PrimaryGeneratedColumn,
 } from 'typeorm';
 import { QuestionFormat } from '../enums/question-format.enum';
 import { QuestionStatus } from '../enums/question-status.enum';
+import { SeedCombination } from './seed-combination.entity';
 
 export interface JudgeScores {
   variance: number;
@@ -33,6 +36,13 @@ export class Question {
 
   @Column({ name: 'seed_hash', type: 'varchar', length: 16, nullable: true })
   seedHash!: string | null;
+
+  // seedHash 컬럼에 FK 제약을 걸기 위한 관계. 실제 쓰기는 위 seedHash
+  // 스칼라 컬럼을 통해 이뤄지므로, 같은 컬럼에 중복 INSERT/UPDATE 가
+  // 발생하지 않도록 관계 쪽은 읽기 전용으로 둔다.
+  @ManyToOne(() => SeedCombination, { nullable: true, persistence: false })
+  @JoinColumn({ name: 'seed_hash', referencedColumnName: 'seedHash' })
+  seedCombination?: SeedCombination | null;
 
   @Column({ type: 'real', array: true, nullable: true })
   embedding!: number[] | null;
