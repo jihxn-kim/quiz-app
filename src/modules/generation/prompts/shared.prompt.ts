@@ -9,6 +9,7 @@ export const TOPIC_TAGS = [
   '음식',
   '사회적금기',
   '비현실상황',
+  '후회',
 ] as const;
 
 export function buildSystemPrompt(args: {
