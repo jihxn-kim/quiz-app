@@ -46,17 +46,13 @@ export class DedupeService {
       ];
 
       const match = this.findMostSimilar(candidate.embedding, pool);
-      // Round to 14 decimal places to avoid floating-point precision issues
-      if (match !== null) {
-        const roundedSimilarity = Math.round(match.similarity * 1e14) / 1e14;
-        if (roundedSimilarity > DUPLICATE_THRESHOLD) {
-          dropped.push({
-            text: candidate.text,
-            similarity: match.similarity,
-            against: match.text,
-          });
-          continue;
-        }
+      if (match !== null && match.similarity > DUPLICATE_THRESHOLD) {
+        dropped.push({
+          text: candidate.text,
+          similarity: match.similarity,
+          against: match.text,
+        });
+        continue;
       }
       kept.push(candidate);
     }

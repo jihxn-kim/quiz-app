@@ -1,5 +1,8 @@
+jest.mock('src/common/utils/cosine');
+
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { cosineSimilarity } from 'src/common/utils/cosine';
 import { EmbeddingClient } from 'src/infrastructure/llm/embedding.client';
 import { Question } from 'src/modules/questions/entities/question.entity';
 import { GeneratedQuestion } from './schemas/generated-question.schema';
@@ -11,9 +14,11 @@ describe('DedupeService', () => {
   let service: DedupeService;
   const embedding = { embed: jest.fn() };
   const repo = { find: jest.fn() };
+  const actualCosineSimilarity = jest.requireActual<typeof import('src/common/utils/cosine')>('src/common/utils/cosine').cosineSimilarity;
 
   beforeEach(async () => {
     jest.resetAllMocks();
+    jest.mocked(cosineSimilarity).mockImplementation(actualCosineSimilarity);
     repo.find.mockResolvedValue([]);
     const moduleRef = await Test.createTestingModule({
       providers: [
@@ -56,14 +61,26 @@ describe('DedupeService', () => {
   });
 
   it('경계값 0.85 는 통과시킨다 (초과일 때만 탈락)', async () => {
-    // cos = 0.85 가 되도록 구성
-    const theta = Math.acos(0.85);
+    // 임계값 판정만 떼어 검증하기 위해 유사도 계산을 목으로 고정한다.
+    // 벡터 기하는 Task 5 의 관심사다.
+    jest.mocked(cosineSimilarity).mockReturnValue(0.85);
     repo.find.mockResolvedValue([{ text: '기존?', embedding: [1, 0] }]);
-    embedding.embed.mockResolvedValue([[Math.cos(theta), Math.sin(theta)]]);
+    embedding.embed.mockResolvedValue([[1, 0]]);
 
     const result = await service.filter([q('경계?')]);
 
     expect(result.kept).toHaveLength(1);
+  });
+
+  it('경계값을 아주 조금이라도 넘으면 탈락시킨다', async () => {
+    jest.mocked(cosineSimilarity).mockReturnValue(0.8500000000000001);
+    repo.find.mockResolvedValue([{ text: '기존?', embedding: [1, 0] }]);
+    embedding.embed.mockResolvedValue([[1, 0]]);
+
+    const result = await service.filter([q('간신히 초과?')]);
+
+    expect(result.kept).toHaveLength(0);
+    expect(result.dropped).toHaveLength(1);
   });
 
   it('임베딩이 없는 기존 질문은 비교에서 제외한다', async () => {
