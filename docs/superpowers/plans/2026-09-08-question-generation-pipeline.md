@@ -2353,14 +2353,27 @@ describe('DedupeService', () => {
   });
 
   it('경계값 0.85 는 통과시킨다 (초과일 때만 탈락)', async () => {
-    // cos = 0.85 가 되도록 구성
-    const theta = Math.acos(0.85);
+    // 삼각함수로 벡터를 만들면 실제 코사인이 0.8500000000000001 이 되어
+    // "정확히 0.85" 를 만들 수 없다. 임계값 판정만 떼어 검증하기 위해
+    // 유사도 계산 자체를 목으로 고정한다 (벡터 기하는 Task 5 의 관심사다).
+    jest.mocked(cosineSimilarity).mockReturnValue(0.85);
     repo.find.mockResolvedValue([{ text: '기존?', embedding: [1, 0] }]);
-    embedding.embed.mockResolvedValue([[Math.cos(theta), Math.sin(theta)]]);
+    embedding.embed.mockResolvedValue([[1, 0]]);
 
     const result = await service.filter([q('경계?')]);
 
     expect(result.kept).toHaveLength(1);
+  });
+
+  it('경계값을 아주 조금이라도 넘으면 탈락시킨다', async () => {
+    jest.mocked(cosineSimilarity).mockReturnValue(0.8500000000000001);
+    repo.find.mockResolvedValue([{ text: '기존?', embedding: [1, 0] }]);
+    embedding.embed.mockResolvedValue([[1, 0]]);
+
+    const result = await service.filter([q('간신히 초과?')]);
+
+    expect(result.kept).toHaveLength(0);
+    expect(result.dropped).toHaveLength(1);
   });
 
   it('임베딩이 없는 기존 질문은 비교에서 제외한다', async () => {
