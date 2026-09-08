@@ -1,8 +1,10 @@
 import { ApiProperty } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
 import { IsString, Length } from 'class-validator';
 
 export class SubmitAnswerDto {
   @ApiProperty({ description: '내 답변. 제출 후 수정 불가', example: '촉감으로 확인할 것 같아', minLength: 1, maxLength: 500 })
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
   @Length(1, 500)
   text!: string;

@@ -29,6 +29,7 @@ import { RoomStateResponseDto } from './dto/room-state.dto';
 import {
   RoundOpenResponseDto,
   RoundRevealedResponseDto,
+  RoundSkippedResponseDto,
   SkipRoundResponseDto,
   StartRoundResponseDto,
 } from './dto/round.dto';
@@ -217,7 +218,7 @@ export class GameController {
 \`\`\`
 
 \`\`\`jsonc
-// status = revealed | skipped
+// status = revealed
 {
   "roundId": "11",
   "status": "revealed",
@@ -232,33 +233,46 @@ export class GameController {
 }
 \`\`\`
 
-라운드가 열려 있는 동안 2초 간격으로 폴링한다. \`status\` 가 \`open\` 이 아니게 되면 공개 화면으로 전환한다.`,
+\`\`\`jsonc
+// status = skipped — 스킵은 공개가 아니다. 이미 제출된 답변이 있어도
+// 이 응답 모양엔 그걸 실을 필드 자체가 없다. answers/revealedAt 전부 없음
+{
+  "roundId": "11",
+  "status": "skipped",
+  "question": { "id": "42", "text": "..." }
+}
+\`\`\`
+
+라운드가 열려 있는 동안 2초 간격으로 폴링한다. \`status\` 가 \`open\` 이 아니게 되면 폴링을 멈춘다.
+\`revealed\` 면 공개 화면으로 전환해서 \`answers\` 를 보여주고, \`skipped\` 면 이번 질문은 건너뛰었다는
+안내만 보여준다 — **스킵은 공개가 아니므로 응답에 답변 텍스트가 절대 없다.**`,
   })
-  @ApiExtraModels(RoundOpenResponseDto, RoundRevealedResponseDto)
+  @ApiExtraModels(RoundOpenResponseDto, RoundRevealedResponseDto, RoundSkippedResponseDto)
   @ApiOkResponse({
     schema: {
       oneOf: [
         { $ref: getSchemaPath(RoundOpenResponseDto) },
         { $ref: getSchemaPath(RoundRevealedResponseDto) },
+        { $ref: getSchemaPath(RoundSkippedResponseDto) },
       ],
     },
   })
   async getRound(
     @Param('id') id: string,
     @CurrentParticipant() me: Participant,
-  ): Promise<RoundOpenResponseDto | RoundRevealedResponseDto> {
+  ): Promise<RoundOpenResponseDto | RoundRevealedResponseDto | RoundSkippedResponseDto> {
     const round = await this.rounds.findById(id);
     const room = await this.roomOf(round.roomId);
     this.rooms.assertMember(room, me);
 
     const question = await this.questions.findOne({ where: { id: round.questionId } });
-    const participants = await this.rooms.listParticipants(round.roomId);
     const questionDto = { id: round.questionId, text: question?.text ?? '' };
 
     if (round.status === RoundStatus.OPEN) {
       // 공개 전에는 listAnswers 를 절대 부르지 않는다 — 남의 답변 텍스트를
       // 프로세스 안으로도 끌어오지 않기 위함이다. 필요한 정보는 제출
       // 여부(submittedParticipantIds)와 내 답변(findMyAnswer)뿐이다.
+      const participants = await this.rooms.listParticipants(round.roomId);
       const [submitted, mine] = await Promise.all([
         this.rounds.submittedParticipantIds(round.id),
         this.rounds.findMyAnswer(round.id, me.id),
@@ -276,13 +290,27 @@ export class GameController {
       };
     }
 
+    if (round.status === RoundStatus.SKIPPED) {
+      // 스킵은 공개가 아니다. listAnswers 를 부르지 않는 것은 물론, 이
+      // 응답 DTO 자체에 답변을 실을 필드가 없다 — 조건부로 비우는 게 아니라
+      // 타입으로 유출 경로를 없앤다.
+      return {
+        roundId: round.id,
+        status: 'skipped',
+        question: questionDto,
+      };
+    }
+
+    // round.status === RoundStatus.REVEALED. listAnswers 는 REVEALED 가
+    // 아니면 스스로 거부하므로(화이트리스트), 여기서만 답변을 가져온다.
+    const participants = await this.rooms.listParticipants(round.roomId);
     const answers = await this.rounds.listAnswers(round);
     const byId = new Map(participants.map((p) => [p.id, p]));
     const answeredIds = new Set(answers.map((a) => a.participantId));
 
     return {
       roundId: round.id,
-      status: round.status === RoundStatus.SKIPPED ? 'skipped' : 'revealed',
+      status: 'revealed',
       question: questionDto,
       revealedAt: round.revealedAt ? round.revealedAt.toISOString() : null,
       revealedBy: round.revealedBy
@@ -348,7 +376,7 @@ export class GameController {
 | 상태 | 뜻 |
 |---|---|
 | 403 | 방장이 아님 |
-| 409 | 이미 공개됨 |`,
+| 409 | 이미 끝난 라운드 (이미 공개됐거나 스킵됨) |`,
   })
   @ApiOkResponse({ type: RoundRevealedResponseDto })
   @HttpCode(HttpStatus.OK)
@@ -381,7 +409,7 @@ export class GameController {
 | 상태 | 뜻 |
 |---|---|
 | 403 | 방장이 아님 |
-| 409 | 이미 공개됨 |`,
+| 409 | 이미 끝난 라운드 (이미 공개됐거나 스킵됨) |`,
   })
   @ApiOkResponse({ type: SkipRoundResponseDto })
   @HttpCode(HttpStatus.OK)

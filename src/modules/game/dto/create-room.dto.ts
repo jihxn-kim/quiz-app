@@ -1,8 +1,10 @@
 import { ApiProperty } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
 import { IsString, Length } from 'class-validator';
 
 export class CreateRoomDto {
   @ApiProperty({ description: '방장이 쓸 닉네임', example: '지훈', minLength: 1, maxLength: 20 })
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
   @IsString()
   @Length(1, 20)
   nickname!: string;

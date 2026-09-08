@@ -8,7 +8,6 @@ import { Room } from './entities/room.entity';
 import { Round } from './entities/round.entity';
 import { RoundStatus } from './enums/round-status.enum';
 import { GameController } from './game.controller';
-import { QuestionPoolService } from './question-pool.service';
 import { RoomService } from './room.service';
 import { RoundService } from './round.service';
 
@@ -46,7 +45,6 @@ describe('GameController', () => {
       providers: [
         { provide: RoomService, useValue: rooms },
         { provide: RoundService, useValue: rounds },
-        { provide: QuestionPoolService, useValue: {} },
         { provide: getRepositoryToken(Question), useValue: questions },
       ],
     })
@@ -108,6 +106,36 @@ describe('GameController', () => {
     const serialized = JSON.stringify(result);
     expect(serialized).toContain('남의 답변');
     expect(rounds.listAnswers).toHaveBeenCalledWith(round);
+  });
+
+  it('C1: 스킵된 라운드는 listAnswers 를 부르지 않고, 응답에 답변 텍스트가 없다', async () => {
+    // 실 DB 재현: 2명 중 1명이 제출한 상태에서 방장이 스킵하면, 아무것도
+    // 안 낸 사람에게도 제출된 답변 전문이 그대로 보였다. revealedAt 이
+    // null 인데도. 스킵 분기는 listAnswers 를 아예 부르지 않고, 응답
+    // DTO(RoundSkippedResponseDto) 자체에 답변을 실을 필드가 없다.
+    const round = { id: '11', roomId: '1', questionId: '42', status: RoundStatus.SKIPPED } as Round;
+    rounds.findById.mockResolvedValue(round);
+    rooms.findById.mockResolvedValue({ id: '1', hostParticipantId: '1' } as Room);
+    // 만약 회귀로 listAnswers 가 다시 불리면 이 스텁이 남의 답변을 흘려서
+    // 아래 assertion 이 잡아낸다.
+    rounds.listAnswers.mockResolvedValue([
+      { participantId: '1', text: '지훈의 민감한 답변' },
+      { participantId: '2', text: '민수의 민감한 답변' },
+    ]);
+    questions.findOne.mockResolvedValue({ id: '42', text: '질문?' });
+
+    // 이 라운드에 아무것도 제출하지 않은 참가자(id: '3')가 조회한다.
+    const result = await controller.getRound('11', { id: '3', roomId: '1' } as Participant);
+
+    expect(result).toEqual({
+      roundId: '11',
+      status: 'skipped',
+      question: { id: '42', text: '질문?' },
+    });
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain('민감한 답변');
+    expect(rounds.listAnswers).not.toHaveBeenCalled();
+    expect(rooms.listParticipants).not.toHaveBeenCalled();
   });
 
   it('getRound: 다른 방 참가자면 거부되고 답변을 조회하지 않는다', async () => {

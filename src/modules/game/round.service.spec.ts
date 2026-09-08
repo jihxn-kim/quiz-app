@@ -15,6 +15,10 @@ import { RoundService } from './round.service';
 const openRound = (over: Partial<Round> = {}): Round =>
   ({ id: '10', roomId: '1', questionId: '42', sequence: 1, status: RoundStatus.OPEN, ...over }) as Round;
 
+/** submit()/reveal() 이 던진 fire-and-forget 통계 쓰기가 끝나길 기다린다. */
+const statsWrite = (service: RoundService): Promise<void> =>
+  (service as unknown as { lastStatsWrite: Promise<void> }).lastStatsWrite;
+
 describe('RoundService', () => {
   let service: RoundService;
   const roundRepo = {
@@ -26,7 +30,7 @@ describe('RoundService', () => {
   };
   const answerRepo = { findOne: jest.fn(), find: jest.fn(), save: jest.fn((a) => a), count: jest.fn() };
   const pool = { drawForRoom: jest.fn() };
-  const rooms = { listParticipants: jest.fn() };
+  const rooms = { listParticipants: jest.fn(), markPlaying: jest.fn() };
   // submit() 은 라운드 행을 잠그고 트랜잭션 안에서 동작한다. manager 는 라운드/답변 양쪽에
   // 쓰이므로 첫 번째 인자(엔티티 클래스)로 호출을 구분해 검증한다.
   const manager = { findOne: jest.fn(), save: jest.fn((_entity, data) => data), count: jest.fn() };
@@ -74,6 +78,33 @@ describe('RoundService', () => {
       await service.start({ id: '1' } as Room);
 
       expect(stats.recordServed).toHaveBeenCalledWith('42');
+    });
+
+    it('I1: 라운드를 시작하면 방을 playing 으로 올린다', async () => {
+      roundRepo.findOne.mockResolvedValue(null);
+      roundRepo.count.mockResolvedValue(0);
+      pool.drawForRoom.mockResolvedValue({ id: '42', text: '질문?' });
+
+      await service.start({ id: '1' } as Room);
+
+      expect(rooms.markPlaying).toHaveBeenCalledWith('1');
+    });
+
+    it('I2: insert 가 유니크 위반(동시에 두 번째 open 라운드)이면 409 로 변환한다', async () => {
+      // findOne 사전 체크와 insert 사이에 다른 요청이 끼어든 경쟁 —
+      // "열린 라운드는 방마다 하나" 부분 유니크 인덱스가 막는다. 방장이
+      // "다음 질문"을 두 번 눌러도 방이 영구적으로 막히면 안 된다.
+      roundRepo.findOne.mockResolvedValue(null);
+      roundRepo.count.mockResolvedValue(0);
+      pool.drawForRoom.mockResolvedValue({ id: '42', text: '질문?' });
+      roundRepo.save.mockImplementationOnce(() => {
+        const error = new Error('duplicate key value violates unique constraint');
+        (error as { driverError?: { code?: string } }).driverError = { code: '23505' };
+        throw error;
+      });
+
+      await expect(service.start({ id: '1' } as Room)).rejects.toBeInstanceOf(ConflictException);
+      expect(rooms.markPlaying).not.toHaveBeenCalled();
     });
   });
 
@@ -152,8 +183,9 @@ describe('RoundService', () => {
       manager.findOne
         .mockResolvedValueOnce(openRound()) // 잠긴 라운드
         .mockResolvedValueOnce(null); // 기존 답변 없음
-      rooms.listParticipants.mockResolvedValue([{ id: '1' }, { id: '2' }]);
-      manager.count.mockResolvedValue(2); // 제출 후 2명
+      // I4: 참가자 수는 manager.count(Participant, ...) 로 같은 트랜잭션
+      // 안에서 읽는다 — 첫 번째 count 호출이 참가자 수, 두 번째가 제출 수다.
+      manager.count.mockResolvedValueOnce(2).mockResolvedValueOnce(2); // 참가자 2, 제출 2
       // 커밋 후 통계를 위해 라운드를 다시 읽는다 (REVEALED 상태로).
       roundRepo.findOne.mockResolvedValue(openRound({ status: RoundStatus.REVEALED }));
       answerRepo.find.mockResolvedValue([
@@ -162,12 +194,16 @@ describe('RoundService', () => {
       ]);
 
       const result = await service.submit(openRound(), { id: '2', roomId: '1' } as Participant, '답');
+      await statsWrite(service);
 
       expect(result.allSubmitted).toBe(true);
       expect(manager.save).toHaveBeenCalledWith(
         Round,
         expect.objectContaining({ status: RoundStatus.REVEALED, revealedBy: null }),
       );
+      expect(manager.count).toHaveBeenCalledWith(Participant, { where: { roomId: '1' } });
+      expect(manager.count).toHaveBeenCalledWith(Answer, { where: { roundId: '10' } });
+      expect(rooms.listParticipants).not.toHaveBeenCalled();
       expect(stats.recordAnswers).toHaveBeenCalledWith('42', ['답1', '답2']);
     });
 
@@ -175,8 +211,7 @@ describe('RoundService', () => {
       manager.findOne
         .mockResolvedValueOnce(openRound()) // 잠긴 라운드
         .mockResolvedValueOnce(null); // 기존 답변 없음
-      rooms.listParticipants.mockResolvedValue([{ id: '1' }, { id: '2' }, { id: '3' }]);
-      manager.count.mockResolvedValue(2);
+      manager.count.mockResolvedValueOnce(3).mockResolvedValueOnce(2); // 참가자 3, 제출 2
       // recordRevealed 가 (버그로) 불려도 통계 경로 자체는 성공하도록 스텁해둔다.
       // 그래야 "recordAnswers 가 안 불렸다" 는 아래 단언이, 통계 경로가 어차피
       // 무관한 이유로 실패해서가 아니라 정말로 recordRevealed 가 호출되지 않아서
@@ -188,6 +223,7 @@ describe('RoundService', () => {
       ]);
 
       const result = await service.submit(openRound(), { id: '2', roomId: '1' } as Participant, '답');
+      await statsWrite(service);
 
       expect(result.allSubmitted).toBe(false);
       expect(manager.save).not.toHaveBeenCalledWith(Round, expect.anything());
@@ -198,12 +234,12 @@ describe('RoundService', () => {
       manager.findOne
         .mockResolvedValueOnce(openRound()) // 잠긴 라운드
         .mockResolvedValueOnce(null); // 기존 답변 없음
-      rooms.listParticipants.mockResolvedValue([{ id: '1' }]);
-      manager.count.mockResolvedValue(1); // 제출 후 1명(전원)
+      manager.count.mockResolvedValueOnce(1).mockResolvedValueOnce(1); // 참가자 1, 제출 1(전원)
       roundRepo.findOne.mockResolvedValue(openRound({ status: RoundStatus.REVEALED }));
       answerRepo.find.mockResolvedValue([{ participantId: '1', text: '혼자' }]);
 
       const result = await service.submit(openRound(), { id: '1', roomId: '1' } as Participant, '답');
+      await statsWrite(service);
 
       expect(result.allSubmitted).toBe(true);
       expect(stats.recordAnswers).not.toHaveBeenCalled();
@@ -213,8 +249,7 @@ describe('RoundService', () => {
       manager.findOne
         .mockResolvedValueOnce(openRound()) // 잠긴 라운드
         .mockResolvedValueOnce(null); // 기존 답변 없음
-      rooms.listParticipants.mockResolvedValue([{ id: '1' }, { id: '2' }]);
-      manager.count.mockResolvedValue(2);
+      manager.count.mockResolvedValueOnce(2).mockResolvedValueOnce(2);
       roundRepo.findOne.mockResolvedValue(openRound({ status: RoundStatus.REVEALED }));
       answerRepo.find.mockResolvedValue([
         { participantId: '1', text: '답1' },
@@ -225,19 +260,55 @@ describe('RoundService', () => {
       await expect(
         service.submit(openRound(), { id: '2', roomId: '1' } as Participant, '답'),
       ).resolves.toEqual({ submitted: true, allSubmitted: true });
+      await statsWrite(service);
     });
 
     it('F1: 공개 후 통계용 findById 가 실패해도 submit() 은 정상 반환한다', async () => {
       manager.findOne
         .mockResolvedValueOnce(openRound()) // 잠긴 라운드
         .mockResolvedValueOnce(null); // 기존 답변 없음
-      rooms.listParticipants.mockResolvedValue([{ id: '1' }, { id: '2' }]);
-      manager.count.mockResolvedValue(2);
+      manager.count.mockResolvedValueOnce(2).mockResolvedValueOnce(2);
       roundRepo.findOne.mockRejectedValue(new Error('커넥션 풀 고갈'));
 
       await expect(
         service.submit(openRound(), { id: '2', roomId: '1' } as Participant, '답'),
       ).resolves.toEqual({ submitted: true, allSubmitted: true });
+      await statsWrite(service);
+    });
+
+    it('I3: 통계 기록은 fire-and-forget 이라 submit() 응답을 기다리게 하지 않는다', async () => {
+      manager.findOne
+        .mockResolvedValueOnce(openRound()) // 잠긴 라운드
+        .mockResolvedValueOnce(null); // 기존 답변 없음
+      manager.count.mockResolvedValueOnce(2).mockResolvedValueOnce(2);
+
+      // recordRevealed 안의 findById 를 오래 걸리는 것처럼 만든다 — 실제로는
+      // OpenAI 임베딩 호출(재시도 포함 최대 분 단위)이 여기 걸린다.
+      let resolveSlowRead: ((round: Round) => void) | undefined;
+      roundRepo.findOne.mockReturnValue(
+        new Promise<Round>((resolve) => {
+          resolveSlowRead = resolve;
+        }),
+      );
+
+      const submitResult = await service.submit(
+        openRound(),
+        { id: '2', roomId: '1' } as Participant,
+        '답',
+      );
+
+      // submit() 은 이미 반환됐는데, 통계 조회는 아직 안 끝났다.
+      expect(submitResult.allSubmitted).toBe(true);
+      expect(stats.recordAnswers).not.toHaveBeenCalled();
+
+      answerRepo.find.mockResolvedValue([
+        { participantId: '1', text: '답1' },
+        { participantId: '2', text: '답2' },
+      ]);
+      resolveSlowRead!(openRound({ status: RoundStatus.REVEALED }));
+      await statsWrite(service);
+
+      expect(stats.recordAnswers).toHaveBeenCalledWith('42', ['답1', '답2']);
     });
   });
 
@@ -270,6 +341,7 @@ describe('RoundService', () => {
     it('답변이 2개 미만이면 recordAnswers 를 부르지 않는다', async () => {
       answerRepo.find.mockResolvedValue([{ participantId: '1', text: '혼자' }]);
       await service.reveal(openRound(), '1');
+      await statsWrite(service);
       expect(stats.recordAnswers).not.toHaveBeenCalled();
     });
 
@@ -279,6 +351,36 @@ describe('RoundService', () => {
         { participantId: '2', text: '답2' },
       ]);
       await service.reveal(openRound(), '1');
+      await statsWrite(service);
+      expect(stats.recordAnswers).toHaveBeenCalledWith('42', ['답1', '답2']);
+    });
+
+    it('I3: 통계 기록은 fire-and-forget 이라 reveal() 응답을 기다리게 하지 않는다', async () => {
+      roundRepo.update.mockResolvedValue({ affected: 1 });
+      let resolveSlowRead: ((round: Round) => void) | undefined;
+      roundRepo.findOne
+        // 1) reveal() 자신이 갱신 후 다시 읽는 findById — 즉시 REVEALED 로 응답한다.
+        .mockResolvedValueOnce(openRound({ status: RoundStatus.REVEALED, revealedBy: '1' }))
+        // 2) recordRevealed 안의 findById — 느리게 응답해 지연을 흉내낸다.
+        .mockImplementationOnce(
+          () =>
+            new Promise<Round>((resolve) => {
+              resolveSlowRead = resolve;
+            }),
+        );
+
+      const revealed = await service.reveal(openRound(), '1');
+
+      expect(revealed.status).toBe(RoundStatus.REVEALED);
+      expect(stats.recordAnswers).not.toHaveBeenCalled();
+
+      answerRepo.find.mockResolvedValue([
+        { participantId: '1', text: '답1' },
+        { participantId: '2', text: '답2' },
+      ]);
+      resolveSlowRead!(openRound({ status: RoundStatus.REVEALED }));
+      await statsWrite(service);
+
       expect(stats.recordAnswers).toHaveBeenCalledWith('42', ['답1', '답2']);
     });
   });
@@ -335,9 +437,15 @@ describe('RoundService', () => {
       });
     });
 
-    it('스킵된 라운드의 답변도 반환한다', async () => {
-      answerRepo.find.mockResolvedValue([]);
-      await expect(service.listAnswers(openRound({ status: RoundStatus.SKIPPED }))).resolves.toEqual([]);
+    it('C1: 스킵된 라운드는 거부한다 (REVEALED 만 허용하는 화이트리스트)', async () => {
+      // 예전엔 "OPEN 이면 거부" 였다 — 블랙리스트라 SKIPPED 가 뚫려서, 방장이
+      // 스킵을 누르면 이미 제출된 답변 전문이 아무것도 안 낸 사람에게까지
+      // 그대로 나갔다. revealedAt 이 null 인데도. 지금은 REVEALED 가
+      // 아니면 전부 거부하는 화이트리스트라 SKIPPED 도 막힌다.
+      await expect(
+        service.listAnswers(openRound({ status: RoundStatus.SKIPPED })),
+      ).rejects.toBeInstanceOf(ConflictException);
+      expect(answerRepo.find).not.toHaveBeenCalled();
     });
   });
 

@@ -43,13 +43,18 @@ export class RevealedAnswerDto {
   text!: string;
 }
 
-/** 공개 후 응답. 이 타입에서만 답변 텍스트가 나온다. */
+/**
+ * 공개 후 응답. 답변 텍스트가 나오는 곳은 이 타입 하나뿐이다. 스킵된
+ * 라운드는 이 DTO 를 절대 쓰지 않는다 — RoundSkippedResponseDto 로 완전히
+ * 분리했다. 조건부로 answers 를 비우는 방식이었다면, 다음에 라운드 상태가
+ * 하나 더 생겼을 때 또 같은 유출이 반복될 수 있었다.
+ */
 export class RoundRevealedResponseDto {
   @ApiProperty({ description: '라운드 id', example: '11' })
   roundId!: string;
 
-  @ApiProperty({ description: '라운드 상태', example: 'revealed', enum: ['revealed', 'skipped'] })
-  status!: 'revealed' | 'skipped';
+  @ApiProperty({ description: '라운드 상태', example: 'revealed', enum: ['revealed'] })
+  status!: 'revealed';
 
   @ApiProperty({ description: '이번 라운드 질문', type: QuestionDto })
   question!: QuestionDto;
@@ -88,4 +93,21 @@ export class SkipRoundResponseDto {
 
   @ApiProperty({ description: '항상 skipped', example: 'skipped', enum: ['skipped'] })
   status!: 'skipped';
+}
+
+/**
+ * 스킵된 라운드의 조회 응답(`GET /rounds/:id`). 스킵은 공개가 아니다 —
+ * 제출된 답변이 있어도 이 응답 모양 자체에 그걸 담을 필드가 없다. 그래서
+ * 스킵 전에 누가 답을 냈든, 아무것도 안 낸 사람에게도 answers 는 절대
+ * 보이지 않는다.
+ */
+export class RoundSkippedResponseDto {
+  @ApiProperty({ description: '라운드 id', example: '11' })
+  roundId!: string;
+
+  @ApiProperty({ description: '항상 skipped', example: 'skipped', enum: ['skipped'] })
+  status!: 'skipped';
+
+  @ApiProperty({ description: '스킵된 라운드의 질문', type: QuestionDto })
+  question!: QuestionDto;
 }

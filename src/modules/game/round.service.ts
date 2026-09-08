@@ -28,6 +28,12 @@ const POSTGRES_UNIQUE_VIOLATION = '23505';
 export class RoundService {
   private readonly logger = new Logger(RoundService.name);
 
+  /**
+   * 마지막으로 던진 fire-and-forget 통계 쓰기의 promise. 게임 흐름은 이걸
+   * 기다리지 않는다 — 테스트가 완료를 확인하고 싶을 때만 접근한다.
+   */
+  private lastStatsWrite: Promise<void> = Promise.resolve();
+
   constructor(
     @InjectRepository(Round) private readonly rounds: Repository<Round>,
     @InjectRepository(Answer) private readonly answers: Repository<Answer>,
@@ -48,12 +54,26 @@ export class RoundService {
     const question = await this.pool.drawForRoom(room.id);
     const sequence = (await this.rounds.count({ where: { roomId: room.id } })) + 1;
 
-    const round = await this.rounds.save({
-      roomId: room.id,
-      questionId: question.id,
-      sequence,
-      status: RoundStatus.OPEN,
-    } as Round);
+    let round: Round;
+    try {
+      round = await this.rounds.save({
+        roomId: room.id,
+        questionId: question.id,
+        sequence,
+        status: RoundStatus.OPEN,
+      } as Round);
+    } catch (error) {
+      // "열린 라운드는 방마다 하나" 유니크 인덱스가 막는다 — 위 findOne 체크와
+      // insert 사이에 같은 방에서 동시에 두 번째 start() 가 끼어든 경우다.
+      // 방장이 "다음 질문"을 두 번 눌러도 방이 영구적으로 막히지 않아야 한다.
+      if ((error as { driverError?: { code?: string } }).driverError?.code === POSTGRES_UNIQUE_VIOLATION) {
+        throw new ConflictException('이전 라운드가 아직 진행 중입니다');
+      }
+      throw error;
+    }
+
+    // 방 상태를 playing 으로 올린다. 이미 playing 이면 조건부 UPDATE 라 그대로 둔다.
+    await this.rooms.markPlaying(room.id);
 
     await this.recordQuietly(() => this.stats.recordServed(question.id), 'served');
 
@@ -110,13 +130,17 @@ export class RoundService {
         throw error;
       }
 
-      // 전원 제출 시 자동 공개. 별도 스케줄러 없이 여기서 전이한다.
-      const [participants, submitted] = await Promise.all([
-        this.rooms.listParticipants(locked.roomId),
+      // 전원 제출 시 자동 공개. 별도 스케줄러 없이 여기서 전이한다. 참가자
+      // 수는 개수만 있으면 되므로 같은 트랜잭션의 manager 로 센다 —
+      // rooms.listParticipants (기본 레포) 로 커넥션을 하나 더 꺼내면, 풀이
+      // 전부 submit 트랜잭션에 잡혔을 때 아무도 두 번째 커넥션을 못 얻어
+      // 전원이 멈춘다. 락 안에서 같은 커넥션으로 읽어 정합성도 보장한다.
+      const [participantCount, submitted] = await Promise.all([
+        manager.count(Participant, { where: { roomId: locked.roomId } }),
         manager.count(Answer, { where: { roundId: locked.id } }),
       ]);
 
-      const allSubmitted = submitted >= participants.length;
+      const allSubmitted = submitted >= participantCount;
       if (allSubmitted) {
         locked.status = RoundStatus.REVEALED;
         locked.revealedAt = new Date();
@@ -129,9 +153,13 @@ export class RoundService {
 
     // 트랜잭션 커밋 후에 통계를 기록한다. 트랜잭션 안에서 부르면 listAnswers 가
     // 다른 커넥션으로 읽어 방금 커밋되지 않은 마지막 답변을 못 보고, 행 잠금도
-    // 통계 기록 동안 계속 잡고 있게 된다.
+    // 통계 기록 동안 계속 잡고 있게 된다. await 하지 않는다 — OpenAI 임베딩
+    // 호출은 재시도까지 포함하면 수 초~수 분이 걸릴 수 있는데, 그동안 마지막
+    // 제출자의 응답만 붙잡아두면 다른 사람들은 폴링으로 이미 공개를 보고
+    // 있는 와중에 정작 그 사람 화면만 멈춘다. recordQuietly 가 예외는 이미
+    // 삼키므로 지연도 격리한다. 테스트는 lastStatsWrite 로 완료를 기다린다.
     if (result.allSubmitted) {
-      await this.recordRevealed(round.id);
+      this.lastStatsWrite = this.recordRevealed(round.id);
     }
 
     return result;
@@ -147,7 +175,9 @@ export class RoundService {
       throw new ConflictException('이미 끝난 라운드입니다');
     }
     const revealed = await this.findById(round.id);
-    await this.recordRevealed(revealed.id);
+    // submit() 과 같은 이유로 기다리지 않는다 — 강제 공개를 누른 방장이
+    // OpenAI 호출이 끝날 때까지 멈춰 있을 이유가 없다.
+    this.lastStatsWrite = this.recordRevealed(revealed.id);
     return revealed;
   }
 
@@ -163,10 +193,17 @@ export class RoundService {
     return this.findById(round.id);
   }
 
-  /** 공개된 라운드의 답변만 반환한다. 열린 라운드에 부르면 거부한다. */
+  /**
+   * REVEALED 상태의 라운드에서만 답변을 반환한다. 그 외는(open 은 물론
+   * skipped 도) 전부 거부한다 — 화이트리스트다. "OPEN 이면 거부"였던 예전
+   * 판정은 블랙리스트라 skipped 가 뚫렸다: 방장이 라운드를 스킵하면
+   * revealedAt 이 null 인데도 이미 제출된 답변 전문이 그대로 나갔다. 다음에
+   * 라운드 상태가 하나 더 생겨도 여기선 기본이 거부이므로 같은 사고가
+   * 반복되지 않는다.
+   */
   async listAnswers(round: Round): Promise<Answer[]> {
-    if (round.status === RoundStatus.OPEN) {
-      throw new ConflictException('아직 공개되지 않은 라운드입니다');
+    if (round.status !== RoundStatus.REVEALED) {
+      throw new ConflictException('공개된 라운드가 아닙니다');
     }
     return this.answers.find({ where: { roundId: round.id }, order: { createdAt: 'ASC' } });
   }
