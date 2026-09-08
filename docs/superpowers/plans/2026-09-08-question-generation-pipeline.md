@@ -12,6 +12,7 @@
 
 ## Global Constraints
 
+- **`openai` 는 반드시 6.x 이상(권장 `^7.10.0`).** 4.x/5.x 는 `peerOptional zod@^3.23.8` 을 요구해서 이 프로젝트의 zod 4 와 충돌하고, `npm install` 이 `--legacy-peer-deps` 없이는 실패한다(로컬에서는 눌러 넘길 수 있지만 배포 빌드가 죽는다 — 실제로 죽었다). 6.x 부터 `zod ^3.25 || ^4.0` 을 받는다.
 - **공급자는 OpenAI 하나다.** 생성·judge·안전 필터는 `gpt-5.5`, 임베딩은 `text-embedding-3-small`(1536차원). 모델 ID 는 상수(`LLM_MODEL`, `EMBEDDING_MODEL`)로 관리하고 하드코딩 금지. `@anthropic-ai/sdk` 는 쓰지 않는다.
 - **모든 LLM 호출은 JSON Schema strict 구조화 출력을 쓴다.** 프롬프트로 "JSON 만 출력해"라고 부탁하는 방식 금지.
 - **구조화 출력 스키마는 zod v4 의 `z.toJSONSchema` 로 만들고 strict 보정을 거친다.** `openai/helpers/zod` 의 `zodResponseFormat`/`zodTextFormat` 은 **쓰지 말 것** — 설치된 openai v4 헬퍼는 zod v3 내부구조를 가정해서 zod v4 스키마를 `type: "string"` 으로 망가뜨린다(실측 확인, 400 `invalid_json_schema`). strict 보정이란 모든 `type: "object"` 노드에 `additionalProperties: false` 를 넣고 `required` 에 전체 프로퍼티 키를 채우는 것이다.
@@ -134,7 +135,7 @@ test/
     "@nestjs/platform-express": "^11.0.0",
     "@nestjs/typeorm": "^11.0.0",
     "nest-commander": "^3.15.0",
-    "openai": "^4.77.0",
+    "openai": "^7.10.0",
     "pg": "^8.13.1",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
@@ -1117,13 +1118,19 @@ git commit -m "feat: 시드 축 테이블과 조합 생성기 추가"
 
 **이 태스크가 왜 이렇게 생겼는지 (실측 근거):** 컨트롤러가 실제 API 로 확인한 것들이다. `openai/helpers/zod` 의 `zodResponseFormat` 은 이 프로젝트의 zod v4 스키마를 `type: "string"` 으로 망가뜨려 400 `invalid_json_schema` 를 낸다. `gpt-5.5` 는 `temperature` 를 기본값 1 이외로 주면 400 이다. 토큰 상한은 `max_completion_tokens` 다. 거절은 예외가 아니라 `message.refusal` 필드로 온다. 아래 구현은 이 네 가지를 전부 반영한 것이니 "더 관용적인 SDK 헬퍼가 있을 텐데" 하고 바꾸지 말 것.
 
-- [ ] **Step 0: Anthropic 잔재 제거**
+- [ ] **Step 0: 공급자 전환 정리 (의존성 + 환경변수)**
 
-Task 1 이 남긴 것들을 지운다. `@anthropic-ai/sdk` 는 zod v4 와 peer 충돌을 일으켜 `npm install` 이 `--legacy-peer-deps` 없이는 실패한다.
+두 가지를 함께 한다. `@anthropic-ai/sdk` 제거는 공급자가 바뀌었기 때문이고, `openai` 업그레이드는 **설치 자체를 고치기 위해서**다.
+
+zod 충돌의 원인은 Anthropic SDK 가 아니라 `openai` 4.x 자신이다 (`peerOptional zod@^3.23.8`). Anthropic SDK 는 오히려 `^3.25.0 || ^4.0.0` 으로 zod 4 를 허용한다. 그래서 Anthropic 만 지우면 `npm install` 은 여전히 깨진 채로 남고 배포 빌드가 죽는다.
 
 ```bash
 npm uninstall @anthropic-ai/sdk
+npm install openai@^7.10.0
+npm install          # --legacy-peer-deps 없이 통과해야 한다
 ```
+
+`openai@7` 에서 이 계획서의 호출 경로가 그대로 동작하는 것은 실측 확인했다 — `chat.completions.create` + raw `response_format`, `message.refusal`, `client.embeddings.create` 모두 동일. 다만 `require('openai/package.json')` 은 exports 맵에 없어서 던지므로 버전 확인은 파일을 직접 읽을 것.
 
 `src/common/config/env.schema.ts` 의 `envSchema` 에서 `ANTHROPIC_API_KEY: z.string().min(1),` 줄을 지운다.
 

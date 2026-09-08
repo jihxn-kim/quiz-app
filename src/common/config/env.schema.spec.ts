@@ -3,7 +3,6 @@ import { validateEnv } from './env.schema';
 describe('validateEnv', () => {
   const valid = {
     DATABASE_URL: 'postgresql://user:pw@host:5432/db',
-    ANTHROPIC_API_KEY: 'sk-ant-test',
     OPENAI_API_KEY: 'sk-test',
     NODE_ENV: 'development',
   };
@@ -24,9 +23,9 @@ describe('validateEnv', () => {
     expect(() => validateEnv(missing)).toThrow(/DATABASE_URL/);
   });
 
-  it('ANTHROPIC_API_KEY 가 빈 문자열이면 에러를 던진다', () => {
-    expect(() => validateEnv({ ...valid, ANTHROPIC_API_KEY: '' })).toThrow(
-      /ANTHROPIC_API_KEY/,
+  it('OPENAI_API_KEY 가 빈 문자열이면 에러를 던진다', () => {
+    expect(() => validateEnv({ ...valid, OPENAI_API_KEY: '' })).toThrow(
+      /OPENAI_API_KEY/,
     );
   });
 });
