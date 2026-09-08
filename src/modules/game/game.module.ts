@@ -8,12 +8,13 @@ import { ParticipantGuard } from './auth/participant.guard';
 import { RoomService } from './room.service';
 import { QuestionsModule } from 'src/modules/questions/questions.module';
 import { QuestionPoolService } from './question-pool.service';
+import { RoundService } from './round.service';
 
 const ENTITIES = [Room, Participant, Round, Answer];
 
 @Module({
   imports: [TypeOrmModule.forFeature(ENTITIES), QuestionsModule],
-  providers: [ParticipantGuard, RoomService, QuestionPoolService],
-  exports: [TypeOrmModule, ParticipantGuard, RoomService, QuestionPoolService],
+  providers: [ParticipantGuard, RoomService, QuestionPoolService, RoundService],
+  exports: [TypeOrmModule, ParticipantGuard, RoomService, QuestionPoolService, RoundService],
 })
 export class GameModule {}
