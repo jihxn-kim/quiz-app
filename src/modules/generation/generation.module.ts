@@ -5,10 +5,11 @@ import { SeedsModule } from 'src/modules/seeds/seeds.module';
 import { QuestionGeneratorService } from './question-generator.service';
 import { DedupeService } from './dedupe.service';
 import { JudgeService } from './judge.service';
+import { SafetyService } from './safety.service';
 
 @Module({
   imports: [LlmModule, QuestionsModule, SeedsModule],
-  providers: [QuestionGeneratorService, DedupeService, JudgeService],
-  exports: [QuestionGeneratorService, DedupeService, JudgeService],
+  providers: [QuestionGeneratorService, DedupeService, JudgeService, SafetyService],
+  exports: [QuestionGeneratorService, DedupeService, JudgeService, SafetyService],
 })
 export class GenerationModule {}
