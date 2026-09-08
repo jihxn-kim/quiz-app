@@ -1,11 +1,12 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { mapWithConcurrency } from 'src/common/utils/concurrency';
 import { shuffle } from 'src/common/utils/shuffle';
 import { LlmClient } from 'src/infrastructure/llm/llm.client';
 import { Question } from 'src/modules/questions/entities/question.entity';
 import { QuestionFormat } from 'src/modules/questions/enums/question-format.enum';
+import { QuestionStatus } from 'src/modules/questions/enums/question-status.enum';
 import { SeedCombinationDto } from 'src/modules/seeds/seed-combination.service';
 import { FORMAT_RULES, buildUserPrompt } from './prompts/format.prompts';
 import { buildSystemPrompt } from './prompts/shared.prompt';
@@ -64,8 +65,14 @@ export class QuestionGeneratorService {
   }
 
   private async loadGoldenPool(format: QuestionFormat): Promise<string[]> {
+    // rejected/retired 로 넘어간 질문은 golden 이 여전히 true 여도 few-shot
+    // 예시로 계속 주입돼선 안 된다 — live/approved 인 것만 읽는다.
     const rows = await this.questions.find({
-      where: { format, golden: true },
+      where: {
+        format,
+        golden: true,
+        status: In([QuestionStatus.LIVE, QuestionStatus.APPROVED]),
+      },
       select: { text: true },
     });
     return rows.map((row) => row.text);

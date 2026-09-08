@@ -36,15 +36,6 @@ export const AXIS_VALUES: Record<QuestionFormat, Record<string, string[]>> = {
       '감각 상실',
       '자유 제한',
     ],
-    miseryB: [
-      '프라이버시 상실',
-      '신체 불편',
-      '사회적 평판',
-      '시간 낭비',
-      '관계 단절',
-      '감각 상실',
-      '자유 제한',
-    ],
     intensity: ['평생', '1년', '하루에 1시간'],
   },
   [QuestionFormat.PROJECTION]: {

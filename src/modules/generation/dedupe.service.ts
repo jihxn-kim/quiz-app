@@ -10,7 +10,9 @@ import { GeneratedQuestion } from './schemas/generated-question.schema';
 export const DUPLICATE_THRESHOLD = 0.85;
 
 export interface EmbeddedQuestion extends GeneratedQuestion {
-  embedding: number[];
+  // 임베딩이 실패하면 중복 제거를 건너뛰고 null 임베딩으로 통과시킨다 —
+  // 그 질문은 반드시 사람 검수를 거치게 된다.
+  embedding: number[] | null;
 }
 
 export interface DedupeResult {
@@ -31,10 +33,25 @@ export class DedupeService {
   async filter(candidates: GeneratedQuestion[]): Promise<DedupeResult> {
     if (candidates.length === 0) return { kept: [], dropped: [] };
 
-    const vectors = await this.embeddings.embed(candidates.map((c) => c.text));
+    let vectors: number[][];
+    try {
+      vectors = await this.embeddings.embed(candidates.map((c) => c.text));
+    } catch (error) {
+      // 스펙의 에러 처리 방침: 임베딩이 실패하면 중복 제거를 건너뛰고
+      // 후보 전부를 pending 으로 통과시켜 사람 검수로 보낸다. 여기서 그냥
+      // 던지면 이미 비용을 지불한 생성 결과가 배치째로 사라진다.
+      this.logger.warn(
+        `임베딩 실패로 중복 제거를 건너뜁니다. 후보 전부를 임베딩 없이 통과시킵니다: ${String(error)}`,
+      );
+      return {
+        kept: candidates.map((c) => ({ ...c, embedding: null })),
+        dropped: [],
+      };
+    }
+
     const existing = await this.loadExisting();
 
-    const kept: EmbeddedQuestion[] = [];
+    const kept: (GeneratedQuestion & { embedding: number[] })[] = [];
     const dropped: DedupeResult['dropped'] = [];
 
     for (let i = 0; i < candidates.length; i += 1) {

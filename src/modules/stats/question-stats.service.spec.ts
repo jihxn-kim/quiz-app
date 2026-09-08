@@ -1,16 +1,17 @@
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { In } from 'typeorm';
 import { EmbeddingClient } from 'src/infrastructure/llm/embedding.client';
 import { Question } from 'src/modules/questions/entities/question.entity';
 import { QuestionStat } from 'src/modules/questions/entities/question-stat.entity';
 import { QuestionStatus } from 'src/modules/questions/enums/question-status.enum';
-import { QuestionStatsService, MIN_SERVED } from './question-stats.service';
+import { QuestionStatsService, MIN_SERVED, MIN_LIVE_POOL } from './question-stats.service';
 
 describe('QuestionStatsService', () => {
   let service: QuestionStatsService;
   const embedding = { embed: jest.fn() };
   const statRepo = { findOne: jest.fn(), save: jest.fn(), find: jest.fn() };
-  const questionRepo = { update: jest.fn(), find: jest.fn() };
+  const questionRepo = { update: jest.fn(), find: jest.fn(), count: jest.fn() };
 
   beforeEach(async () => {
     jest.resetAllMocks();
@@ -161,9 +162,31 @@ describe('QuestionStatsService', () => {
         { questionId: '4', served: 100, skipped: 1, completed: 90, answerVariance: 0.3 },
         { questionId: '5', served: 100, skipped: 1, completed: 90, answerVariance: 0.2 },
       ]);
+      questionRepo.update.mockResolvedValue({ affected: 1 });
 
       await expect(service.promoteGolden()).resolves.toBe(1);
-      expect(questionRepo.update).toHaveBeenCalledWith(['1'], { golden: true });
+      expect(questionRepo.update).toHaveBeenCalledWith(
+        { id: In(['1']), status: In([QuestionStatus.LIVE, QuestionStatus.APPROVED]) },
+        { golden: true },
+      );
+    });
+
+    it('rejected/retired 로 넘어간 질문은 승격 대상에서 걸러지고, 실제로 반영된 건수만 반환한다', async () => {
+      // rejected 질문 하나가 여전히 분산도 조건을 만족해 후보에 포함되더라도,
+      // DB 쪽 status 필터가 걸러 실제로는 반영되지 않는 상황을 흉내낸다.
+      statRepo.find.mockResolvedValue([
+        { questionId: '1', served: 100, skipped: 1, completed: 90, answerVariance: 0.9 },
+      ]);
+      questionRepo.update.mockResolvedValue({ affected: 0 });
+
+      const promoted = await service.promoteGolden();
+
+      expect(questionRepo.update).toHaveBeenCalledWith(
+        { id: In(['1']), status: In([QuestionStatus.LIVE, QuestionStatus.APPROVED]) },
+        { golden: true },
+      );
+      // ids.length(1) 이 아니라 실제로 반영된 건수(0)를 반환해야 한다.
+      expect(promoted).toBe(0);
     });
   });
 
@@ -172,6 +195,7 @@ describe('QuestionStatsService', () => {
       statRepo.find.mockResolvedValue([
         { questionId: '1', served: 100, skipped: 40, completed: 50, answerVariance: 0.8 },
       ]);
+      questionRepo.count.mockResolvedValue(1000); // live 풀이 충분히 크다
 
       await expect(service.retireUnderperformers()).resolves.toBe(1);
     });
@@ -182,6 +206,8 @@ describe('QuestionStatsService', () => {
       ]);
 
       await expect(service.retireUnderperformers()).resolves.toBe(0);
+      // 후보가 없으므로 live 풀 크기를 조회할 필요조차 없다.
+      expect(questionRepo.count).not.toHaveBeenCalled();
     });
 
     it('스킵률은 모두 안전 범위일 때 분산도 하위 10%만 은퇴한다', async () => {
@@ -195,11 +221,38 @@ describe('QuestionStatsService', () => {
         { questionId: '4', served: 100, skipped: 1, completed: 90, answerVariance: 0.3 },
         { questionId: '5', served: 100, skipped: 1, completed: 90, answerVariance: 0.1 },
       ]);
+      questionRepo.count.mockResolvedValue(1000);
 
       await expect(service.retireUnderperformers()).resolves.toBe(1);
+      // golden 도 함께 false 로 내려가야 한다 — 그렇지 않으면 은퇴한 질문이
+      // loadGoldenPool 에서 계속 few-shot 예시로 뽑힌다.
       expect(questionRepo.update).toHaveBeenCalledWith(['5'], {
         status: QuestionStatus.RETIRED,
+        golden: false,
       });
+    });
+
+    it('은퇴시키면 live 풀이 최소 보유량 아래로 떨어질 때는 아무것도 은퇴시키지 않는다', async () => {
+      statRepo.find.mockResolvedValue([
+        { questionId: '1', served: 100, skipped: 1, completed: 90, answerVariance: 0.1 },
+      ]);
+      // live 50건 중 1건을 은퇴시키면 49건 — MIN_LIVE_POOL(50) 미만이 된다.
+      questionRepo.count.mockResolvedValue(MIN_LIVE_POOL);
+
+      await expect(service.retireUnderperformers()).resolves.toBe(0);
+      expect(questionRepo.update).not.toHaveBeenCalled();
+    });
+
+    it('은퇴 후에도 정확히 최소 보유량이 남으면(경계값) 은퇴시킨다', async () => {
+      statRepo.find.mockResolvedValue([
+        { questionId: '1', served: 100, skipped: 1, completed: 90, answerVariance: 0.1 },
+      ]);
+      // live 51건 중 1건을 은퇴시키면 정확히 50건 — MIN_LIVE_POOL 과 같으므로
+      // "아래로 떨어진다"에 해당하지 않는다.
+      questionRepo.count.mockResolvedValue(MIN_LIVE_POOL + 1);
+
+      await expect(service.retireUnderperformers()).resolves.toBe(1);
+      expect(questionRepo.update).toHaveBeenCalled();
     });
   });
 });
