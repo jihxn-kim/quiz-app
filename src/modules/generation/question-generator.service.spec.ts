@@ -18,14 +18,9 @@ describe('QuestionGeneratorService', () => {
 
   beforeEach(async () => {
     jest.resetAllMocks();
-    questionRepo.find.mockResolvedValue([
-      { text: '골든 질문 1?' },
-      { text: '골든 질문 2?' },
-      { text: '골든 질문 3?' },
-      { text: '골든 질문 4?' },
-      { text: '골든 질문 5?' },
-      { text: '골든 질문 6?' },
-    ]);
+    questionRepo.find.mockResolvedValue(
+      Array.from({ length: 20 }, (_, i) => ({ text: `골든 질문 ${i + 1}?` })),
+    );
     const moduleRef = await Test.createTestingModule({
       providers: [
         QuestionGeneratorService,
@@ -70,10 +65,26 @@ describe('QuestionGeneratorService', () => {
 
     await service.generate(QuestionFormat.CONSTRAINT, COMBOS, 3);
 
-    // 같은 호출에서 재사용된 배열 참조가 아니라 매번 새로 뽑는지 확인
+    // 골든 풀은 한 번만 읽는다
     expect(questionRepo.find).toHaveBeenCalledTimes(1);
+
+    // 청크마다 새로 샘플링하면 시스템 프롬프트가 서로 달라진다.
+    // 루프 밖으로 hoist 하면 3개가 전부 같아져 이 단언이 깨진다.
     const systems = llm.completeJson.mock.calls.map((call) => call[0].system);
-    expect(new Set(systems).size).toBeGreaterThanOrEqual(1);
+    expect(systems).toHaveLength(3);
+    expect(new Set(systems).size).toBeGreaterThan(1);
+  });
+
+  it('해당 형식의 골든 질문만 예시로 읽는다', async () => {
+    llm.completeJson.mockResolvedValue({ items: [] });
+
+    await service.generate(QuestionFormat.DILEMMA, COMBOS.slice(0, 1), 3);
+
+    expect(questionRepo.find).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { format: QuestionFormat.DILEMMA, golden: true },
+      }),
+    );
   });
 
   it('입력에 없는 seedHash 가 돌아오면 버린다', async () => {
