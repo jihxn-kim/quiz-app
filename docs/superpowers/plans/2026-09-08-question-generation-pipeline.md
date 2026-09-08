@@ -438,12 +438,9 @@ export class Question {
   @Column({ name: 'seed_hash', type: 'varchar', length: 16, nullable: true })
   seedHash!: string | null;
 
-  @ManyToOne(() => SeedCombination, { nullable: true, onDelete: 'SET NULL' })
-  @JoinColumn({
-    name: 'seed_hash',
-    referencedColumnName: 'seedHash',
-    foreignKeyConstraintName: 'FK_questions_seed_combinations',
-  })
+  // persistence: false — 스칼라 seedHash 가 유일한 쓰기 경로. 관계는 FK 생성 목적.
+  @ManyToOne(() => SeedCombination, { nullable: true, persistence: false })
+  @JoinColumn({ name: 'seed_hash', referencedColumnName: 'seedHash' })
   seedCombination?: SeedCombination | null;
 
   @Column({ type: 'real', array: true, nullable: true })
@@ -546,11 +543,9 @@ export class QuestionStat {
   @PrimaryColumn({ name: 'question_id', type: 'bigint' })
   questionId!: string;
 
-  @ManyToOne(() => Question, { onDelete: 'CASCADE' })
-  @JoinColumn({
-    name: 'question_id',
-    foreignKeyConstraintName: 'FK_question_stats_questions',
-  })
+  // persistence: false — 스칼라 questionId 가 유일한 쓰기 경로. 관계는 FK 생성 목적.
+  @ManyToOne(() => Question, { persistence: false })
+  @JoinColumn({ name: 'question_id', referencedColumnName: 'id' })
   question?: Question;
 
   @Column({ type: 'int', default: 0 })
