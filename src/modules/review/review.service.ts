@@ -91,9 +91,22 @@ export class ReviewService {
     }
   }
 
-  /** 승인된 질문을 서빙 대상으로 올린다. 형식/소재 균형은 호출자가 정한다. */
+  /**
+   * approve 와 동일한 이유로 approved 상태에만 배포를 적용한다. 대상 id 중
+   * 일부라도 approved 상태가 아니면(존재하지 않거나 이미 처리됨) 나머지만
+   * 조용히 live 로 올리지 않고 에러를 던진다.
+   */
   async publish(ids: string[]): Promise<void> {
     if (ids.length === 0) return;
-    await this.questions.update(ids, { status: QuestionStatus.LIVE });
+    const result = await this.questions.update(
+      { id: In(ids), status: QuestionStatus.APPROVED },
+      { status: QuestionStatus.LIVE },
+    );
+    if (result.affected !== ids.length) {
+      const notApproved = ids.length - (result.affected ?? 0);
+      throw new Error(
+        `요청한 ${ids.length}건 중 ${notApproved}건이 승인(approved) 상태가 아닙니다 (존재하지 않거나 이미 처리됨)`,
+      );
+    }
   }
 }

@@ -7,6 +7,7 @@ interface ReviewOptions {
   approve?: string;
   reject?: string;
   reason?: string;
+  publish?: string;
   reviewer: string;
 }
 
@@ -19,6 +20,15 @@ export class ReviewCommand extends CommandRunner {
   }
 
   async run(_args: string[], options: ReviewOptions): Promise<void> {
+    if (options.publish) {
+      const ids = options.publish
+        .split(',')
+        .map((id) => id.trim())
+        .filter((id) => id.length > 0);
+      await this.review.publish(ids);
+      this.logger.log(`배포: ${ids.join(', ')} (${ids.length}건이 live 가 됨)`);
+      return;
+    }
     if (options.approve) {
       await this.review.approve(options.approve, options.reviewer);
       this.logger.log(`승인: ${options.approve}`);
@@ -81,6 +91,14 @@ export class ReviewCommand extends CommandRunner {
 
   @Option({ flags: '--reason <reason>', description: '반려 사유' })
   parseReason(value: string): string { return value; }
+
+  @Option({
+    flags: '--publish <ids>',
+    description: '승인된 질문을 live 로 올린다. 쉼표로 여러 개 (예: --publish 3,7,11)',
+  })
+  parsePublish(value: string): string {
+    return value;
+  }
 
   @Option({
     flags: '--reviewer <name>',

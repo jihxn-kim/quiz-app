@@ -1,5 +1,6 @@
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { In } from 'typeorm';
 import { Question } from 'src/modules/questions/entities/question.entity';
 import { QuestionStatus } from 'src/modules/questions/enums/question-status.enum';
 import { ReviewService, AUTO_APPROVE_THRESHOLD, AUTO_APPROVE_MIN_APPROVED } from './review.service';
@@ -121,6 +122,31 @@ describe('ReviewService', () => {
       repo.update.mockResolvedValue({ affected: 0, raw: [], generatedMaps: [] });
 
       await expect(service.reject('999', 'jihun', '사유')).rejects.toThrow('999');
+    });
+  });
+
+  describe('publish', () => {
+    it('approved 상태인 질문만 배포 대상으로 삼아 live 로 바꾼다', async () => {
+      repo.update.mockResolvedValue({ affected: 2, raw: [], generatedMaps: [] });
+
+      await service.publish(['3', '7']);
+
+      expect(repo.update).toHaveBeenCalledWith(
+        { id: In(['3', '7']), status: QuestionStatus.APPROVED },
+        { status: QuestionStatus.LIVE },
+      );
+    });
+
+    it('요청한 id 중 일부가 approved 상태가 아니면 에러를 던지고 나머지도 live 로 올리지 않는다', async () => {
+      repo.update.mockResolvedValue({ affected: 1, raw: [], generatedMaps: [] });
+
+      await expect(service.publish(['3', '7', '999'])).rejects.toThrow('2건');
+    });
+
+    it('빈 배열이면 update 를 호출하지 않는다', async () => {
+      await service.publish([]);
+
+      expect(repo.update).not.toHaveBeenCalled();
     });
   });
 });

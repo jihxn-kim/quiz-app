@@ -16,6 +16,7 @@ describe('ReviewCommand', () => {
   const review = {
     approve: jest.fn(),
     reject: jest.fn(),
+    publish: jest.fn(),
     listPending: jest.fn(),
     countApproved: jest.fn(),
   };
@@ -83,5 +84,15 @@ describe('ReviewCommand', () => {
     ).rejects.toThrow('검수 대기 상태가 아닙니다');
 
     expect(loggerLogSpy).not.toHaveBeenCalledWith(expect.stringContaining('승인:'));
+  });
+
+  it('--publish 는 쉼표로 구분된 id 들을 배포한다', async () => {
+    await command.run([], { publish: '3,7,11', reviewer: 'jihun' });
+    expect(review.publish).toHaveBeenCalledWith(['3', '7', '11']);
+  });
+
+  it('--publish 는 공백을 무시한다', async () => {
+    await command.run([], { publish: ' 3 , 7 ', reviewer: 'jihun' });
+    expect(review.publish).toHaveBeenCalledWith(['3', '7']);
   });
 });
