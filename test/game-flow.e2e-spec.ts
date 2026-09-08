@@ -5,6 +5,7 @@ import request from 'supertest';
 import { DataSource } from 'typeorm';
 import { AppModule } from 'src/app.module';
 import { PARTICIPANT_TOKEN_HEADER } from 'src/modules/game/auth/participant.guard';
+import { QuestionStatsService } from 'src/modules/stats/question-stats.service';
 
 jest.setTimeout(60_000);
 
@@ -17,9 +18,24 @@ describe('게임 전체 흐름 (실제 DB)', () => {
   let otherCode: string;
 
   beforeAll(async () => {
-    const moduleRef = await Test.createTestingModule({ imports: [AppModule] }).compile();
+    const moduleRef = await Test.createTestingModule({ imports: [AppModule] })
+      // 이 스펙은 게임 흐름만 검증한다. QuestionStatsService 를 그대로 두면
+      // 실제 골든 질문의 served/분산도 통계가 오염되고(더미 텍스트가 첫
+      // 표본으로 누적 평균에 박힌다) 실행마다 OpenAI 임베딩 비용도 든다.
+      .overrideProvider(QuestionStatsService)
+      .useValue({
+        recordServed: async () => {},
+        recordSkipped: async () => {},
+        recordAnswers: async () => {},
+      })
+      .compile();
     app = moduleRef.createNestApplication();
-    app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+    // main.ts 의 프로덕션 파이프와 동일하게 맞춘다 — forbidNonWhitelisted
+    // 가 빠지면 이 스펙은 프로덕션 파이프가 실제로 검증하는 걸 검증하지
+    // 못한다.
+    app.useGlobalPipes(
+      new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
+    );
     await app.init();
   });
 
@@ -183,5 +199,39 @@ describe('게임 전체 흐름 (실제 DB)', () => {
       .post(`/rounds/${newRoundId}/reveal`)
       .set(PARTICIPANT_TOKEN_HEADER, hostToken)
       .expect(200);
+  });
+
+  it('C1: 한 명만 제출한 라운드를 스킵하면 응답 어디에도 답변 텍스트가 없다', async () => {
+    // 실 DB로 재현됐던 버그: 2명 중 1명만 제출한 상태에서 방장이 스킵하면
+    // 아무것도 안 낸 사람에게도 제출된 답변 전문이 그대로 보였다. revealedAt
+    // 은 null 인데도 — 공개된 적이 없는데 공개된 것처럼 답변이 샜다.
+    const started = await request(app.getHttpServer())
+      .post(`/rooms/${code}/rounds`)
+      .set(PARTICIPANT_TOKEN_HEADER, hostToken)
+      .expect(201);
+    const skippedRoundId = started.body.roundId;
+
+    await request(app.getHttpServer())
+      .post(`/rounds/${skippedRoundId}/answers`)
+      .set(PARTICIPANT_TOKEN_HEADER, guestToken)
+      .send({ text: '민수의 민감한 답변' })
+      .expect(201);
+
+    await request(app.getHttpServer())
+      .post(`/rounds/${skippedRoundId}/skip`)
+      .set(PARTICIPANT_TOKEN_HEADER, hostToken)
+      .expect(200);
+
+    // 방장은 이 라운드에 아무것도 제출하지 않았다 — 브리핑의 "세 번째
+    // 사람"에 해당한다.
+    const seen = await request(app.getHttpServer())
+      .get(`/rounds/${skippedRoundId}`)
+      .set(PARTICIPANT_TOKEN_HEADER, hostToken)
+      .expect(200);
+
+    expect(seen.body.status).toBe('skipped');
+    expect(seen.body.revealedAt).toBeUndefined();
+    expect(seen.body.answers).toBeUndefined();
+    expect(JSON.stringify(seen.body)).not.toContain('민수의 민감한 답변');
   });
 });

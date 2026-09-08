@@ -28,4 +28,23 @@ describe('validateEnv', () => {
       /OPENAI_API_KEY/,
     );
   });
+
+  it('I7: PORT/CORS_ORIGINS 이 없어도 통과한다 (둘 다 선택 항목)', () => {
+    const env = validateEnv(valid);
+    expect(env.PORT).toBeUndefined();
+    expect(env.CORS_ORIGINS).toBeUndefined();
+  });
+
+  it('I7: PORT 를 숫자로 강제 변환한다', () => {
+    const env = validateEnv({ ...valid, PORT: '4000' });
+    expect(env.PORT).toBe(4000);
+  });
+
+  it('I7: CORS_ORIGINS 는 콤마로 구분된 문자열 그대로 통과한다', () => {
+    const env = validateEnv({
+      ...valid,
+      CORS_ORIGINS: 'https://a.example.com,https://b.example.com',
+    });
+    expect(env.CORS_ORIGINS).toBe('https://a.example.com,https://b.example.com');
+  });
 });
