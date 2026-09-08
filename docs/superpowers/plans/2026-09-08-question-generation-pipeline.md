@@ -3344,7 +3344,9 @@ import { CommandFactory } from 'nest-commander';
 import { AppModule } from './app.module';
 
 async function bootstrap(): Promise<void> {
-  await CommandFactory.run(AppModule, ['warn', 'error', 'log']);
+  // 'log' 를 빼서 InstanceLoader 부트스트랩 로그를 죽인다.
+  // 검수 큐는 사람이 읽는 화면이라 프레임워크 소음이 내용을 밀어낸다.
+  await CommandFactory.run(AppModule, ['warn', 'error']);
 }
 
 void bootstrap();
@@ -4157,16 +4159,26 @@ export class ReviewCommand extends CommandRunner {
 
     const pending = await this.review.listPending();
     const approved = await this.review.countApproved();
-    this.logger.log(`검수 대기 ${pending.length}건 / 누적 승인 ${approved}건`);
+
+    // logger 가 아니라 console 로 낸다. 타임스탬프·PID 프레이밍이 줄마다 60자씩
+    // 붙으면 질문 텍스트가 밀려서 훑기 어려워지고, 검수자가 대충 승인하기 시작하면
+    // 안전 설계가 기대는 사람 게이트가 형식만 남는다.
+    const lines: string[] = [
+      `검수 대기 ${pending.length}건 / 누적 승인 ${approved}건`,
+      '점수: v=답변분산 a=접근성 c=구체성 q=궁금증 (각 0-5)',
+      '',
+    ];
     for (const question of pending) {
       const scores = question.judgeScores;
       const score = scores
         ? `v${scores.variance} a${scores.accessibility} c${scores.concreteness} q${scores.curiosity}`
         : '판정없음';
-      this.logger.log(`[${question.id}] (${score}) ${question.text}`);
-      if (scores?.reason) this.logger.log(`      근거: ${scores.reason}`);
-      if (question.safetyReason) this.logger.log(`      안전: ${question.safetyReason}`);
+      lines.push(`[${question.id}] (${score}) ${question.text}`);
+      if (scores?.reason) lines.push(`      근거: ${scores.reason}`);
+      if (question.safetyReason) lines.push(`      안전: ${question.safetyReason}`);
+      lines.push('');
     }
+    console.log(lines.join('\n'));
   }
 
   @Option({ flags: '--approve <id>', description: '승인할 질문 id' })
@@ -4245,10 +4257,21 @@ export class QuestionStatsService {
       (await this.stats.findOne({ where: { questionId } })) ??
       this.stats.create({ questionId, served: 0, completed: 0, skipped: 0 });
 
+    // 누적 평균으로 갱신한다. 덮어쓰면 MIN_SERVED 표본 가드가 무의미해진다 —
+    // 200번 서빙된 질문이 마지막 한 방의 분산만으로 승격/은퇴될 수 있다.
+    const previousCompleted = stat.completed;
     stat.completed += 1;
-    stat.answerVariance = meanPairwiseDistance(vectors);
-    stat.avgAnswerLen =
+
+    const roomVariance = meanPairwiseDistance(vectors);
+    stat.answerVariance =
+      ((stat.answerVariance ?? 0) * previousCompleted + roomVariance) /
+      stat.completed;
+
+    const roomAvgLen =
       answers.reduce((sum, answer) => sum + answer.length, 0) / answers.length;
+    stat.avgAnswerLen =
+      ((stat.avgAnswerLen ?? 0) * previousCompleted + roomAvgLen) /
+      stat.completed;
 
     await this.stats.save(stat);
   }
