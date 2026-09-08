@@ -41,7 +41,11 @@ describe('QuestionPoolService', () => {
     qb.getOne.mockResolvedValue({ id: '42' });
     await service.drawForRoom('7');
     const [clause, params] = qb.andWhere.mock.calls[0];
-    expect(String(clause)).toContain('rounds');
+    // 'rounds' 만 확인하면 room_id 조건이 빠져도 통과한다 — 모든 방에서 나온 질문을
+    // 통째로 제외하게 되는 회귀를 잡으려면 조건절 전문을 확인해야 한다.
+    expect(String(clause)).toBe(
+      'q.id NOT IN (SELECT r.question_id FROM rounds r WHERE r.room_id = :roomId)',
+    );
     expect(params).toEqual({ roomId: '7' });
   });
 
