@@ -35,10 +35,21 @@ export class QuestionStatsService {
       (await this.stats.findOne({ where: { questionId } })) ??
       this.stats.create({ questionId, served: 0, completed: 0, skipped: 0 });
 
+    // 누적 평균으로 갱신한다. 덮어쓰면 MIN_SERVED 표본 가드가 무의미해진다 —
+    // 200번 서빙된 질문이 마지막 한 방의 분산만으로 승격/은퇴될 수 있다.
+    const previousCompleted = stat.completed;
     stat.completed += 1;
-    stat.answerVariance = meanPairwiseDistance(vectors);
-    stat.avgAnswerLen =
+
+    const roomVariance = meanPairwiseDistance(vectors);
+    stat.answerVariance =
+      ((stat.answerVariance ?? 0) * previousCompleted + roomVariance) /
+      stat.completed;
+
+    const roomAvgLen =
       answers.reduce((sum, answer) => sum + answer.length, 0) / answers.length;
+    stat.avgAnswerLen =
+      ((stat.avgAnswerLen ?? 0) * previousCompleted + roomAvgLen) /
+      stat.completed;
 
     await this.stats.save(stat);
   }
