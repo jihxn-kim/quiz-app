@@ -23,6 +23,8 @@
 - judge 합격선: 안전 통과 **AND** 4개 항목 평균 **>= 3.5** **AND** `variance` **>= 3**.
 - 커밋 메시지는 **영어+한글만, 한자 금지**.
 - 기존 NestJS 프로젝트 관례를 따른다: `src/{common,infrastructure,modules}` 레이아웃, 파일명 `*.service.ts` / `*.entity.ts` / `*.module.ts`.
+- **import 는 `src/...` 절대 경로 별칭을 쓴다.** 이 별칭은 세 곳에서 해석된다 — jest 는 `moduleNameMapper`, `npm run cli` 와 `start:dev` 는 `ts-node -r tsconfig-paths/register`, 빌드 산출물은 `tsc-alias`. 셋 중 하나라도 빠지면 런타임에 `Cannot find module 'src/...'` 가 난다. 스크립트를 건드릴 때 이 세 경로를 깨지 않는지 확인할 것.
+- **`package.json` 을 수정하는 태스크는 `package-lock.json` 도 함께 커밋한다.** 여러 태스크가 이어서 의존성을 추가하므로 락파일이 없으면 전이 의존성이 조용히 드리프트한다.
 
 ---
 
@@ -111,9 +113,9 @@ test/
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "nest build",
-    "start": "nest start",
-    "start:dev": "nest start --watch",
+    "build": "nest build && tsc-alias -p tsconfig.build.json",
+    "start": "npm run build && node dist/main",
+    "start:dev": "ts-node -r tsconfig-paths/register src/main.ts",
     "cli": "ts-node -r tsconfig-paths/register src/cli.ts",
     "test": "jest",
     "test:watch": "jest --watch",
@@ -142,6 +144,7 @@ test/
     "jest": "^29.7.0",
     "ts-jest": "^29.2.5",
     "ts-node": "^10.9.2",
+    "tsc-alias": "^1.8.10",
     "tsconfig-paths": "^4.2.0",
     "typescript": "^5.7.2"
   },
@@ -339,7 +342,7 @@ Expected: PASS (4 tests)
 - [ ] **Step 6: 커밋**
 
 ```bash
-git add package.json tsconfig.json tsconfig.build.json nest-cli.json .gitignore .env.example src/
+git add package.json package-lock.json tsconfig.json tsconfig.build.json nest-cli.json .gitignore .env.example src/
 git commit -m "feat: NestJS 스캐폴딩과 환경변수 검증 추가"
 ```
 
