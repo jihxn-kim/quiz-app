@@ -237,6 +237,8 @@ JSON 배열만 출력한다. 다른 텍스트는 쓰지 않는다.
 1. **시드 해시 중복** — 이미 사용된 조합은 배치 진입 전에 제외
 2. **임베딩 유사도** — 생성된 질문을 임베딩해서 기존 풀 및 같은 배치 내 질문과 비교. 코사인 유사도 **0.85 초과**면 탈락
 
+임베딩은 `REAL[]` 컬럼에 저장하고 코사인 유사도는 애플리케이션에서 계산한다. 풀 규모(수백~수천)에서는 전체를 메모리로 읽어 비교해도 충분하며, pgvector 확장 의존성을 지지 않는다. 풀이 1만 개를 넘어가면 그때 pgvector + IVFFlat 인덱스로 이전한다.
+
 같은 배치 안의 중복은 점수가 높은 쪽을 남긴다 (judge 이후 처리).
 
 ## 7. 심사 (LLM judge)
@@ -404,7 +406,7 @@ CREATE TABLE questions (
   format        TEXT NOT NULL,
   topic_tags    TEXT[] NOT NULL DEFAULT '{}',
   seed_hash     TEXT REFERENCES seed_combinations(seed_hash),
-  embedding     VECTOR(1536),
+  embedding     REAL[],               -- 1536차원. 풀 규모가 작아 pgvector 불필요, 유사도는 앱에서 계산
   judge_scores  JSONB,                -- {variance, accessibility, concreteness, curiosity, reason}
   safety_passed BOOLEAN,
   safety_reason TEXT,
@@ -503,7 +505,23 @@ constraint 기준
 | 미사용 시드 고갈 | 배치 중단하고 축 테이블 확장 필요 알림 |
 | 라이브 질문 부족 | 은퇴 정지 + 배치 실행 알림 |
 
-## 15. 범위 밖
+## 15. 실행 방식
+
+파이프라인은 **동기 호출 + 동시성 제한**으로 실행한다. Batches API(비동기, 50% 할인)는 쓰지 않는다.
+
+파이프라인 1회분의 실측 규모:
+
+| 단계 | 요청 수 | 비고 |
+|---|---|---|
+| 생성 | ~9 | 시드 10개씩 묶어 요청, 요청당 30개 후보 |
+| judge | ~14 | 질문 20개씩 묶어 요청 |
+| 안전 필터 | ~14 | judge 와 동일 묶음 |
+
+토큰 비용이 회당 $2 미만이라 Batches 로 아끼는 금액보다 비동기 폴링 코드와 최대 24시간 지연의 비용이 크다. 볼륨이 10배 이상 커지면 재검토한다.
+
+동시성은 4로 제한한다(레이트리밋 여유). 실패는 지수 백오프 3회 재시도.
+
+## 16. 범위 밖
 
 - 앱의 방(room) 생성, 초대, 답변 제출, 공개 로직
 - 유저 인증
