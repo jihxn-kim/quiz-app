@@ -1,11 +1,12 @@
 import {
   ConflictException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { Question } from 'src/modules/questions/entities/question.entity';
 import { Answer } from './entities/answer.entity';
 import { Participant } from './entities/participant.entity';
@@ -20,6 +21,8 @@ export interface RoundSubmissionResult {
   allSubmitted: boolean;
 }
 
+const POSTGRES_UNIQUE_VIOLATION = '23505';
+
 @Injectable()
 export class RoundService {
   private readonly logger = new Logger(RoundService.name);
@@ -29,6 +32,7 @@ export class RoundService {
     @InjectRepository(Answer) private readonly answers: Repository<Answer>,
     private readonly pool: QuestionPoolService,
     private readonly rooms: RoomService,
+    private readonly dataSource: DataSource,
   ) {}
 
   async start(room: Room): Promise<{ round: Round; question: Question }> {
@@ -68,60 +72,92 @@ export class RoundService {
     participant: Participant,
     text: string,
   ): Promise<RoundSubmissionResult> {
-    if (round.status !== RoundStatus.OPEN) {
-      throw new ConflictException('이미 끝난 라운드입니다');
+    if (participant.roomId !== round.roomId) {
+      throw new ForbiddenException('이 방의 참가자가 아닙니다');
     }
 
-    const existing = await this.answers.findOne({
-      where: { roundId: round.id, participantId: participant.id },
+    return this.dataSource.transaction(async (manager) => {
+      const locked = await manager.findOne(Round, {
+        where: { id: round.id },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!locked) throw new NotFoundException(`라운드를 찾을 수 없습니다: ${round.id}`);
+      if (locked.status !== RoundStatus.OPEN) {
+        throw new ConflictException('이미 끝난 라운드입니다');
+      }
+
+      const existing = await manager.findOne(Answer, {
+        where: { roundId: locked.id, participantId: participant.id },
+      });
+      if (existing) {
+        throw new ConflictException('이미 제출했습니다. 수정할 수 없습니다');
+      }
+
+      try {
+        await manager.save(Answer, {
+          roundId: locked.id,
+          participantId: participant.id,
+          text,
+        } as Answer);
+      } catch (error) {
+        if ((error as { driverError?: { code?: string } }).driverError?.code === POSTGRES_UNIQUE_VIOLATION) {
+          throw new ConflictException('이미 제출했습니다. 수정할 수 없습니다');
+        }
+        throw error;
+      }
+
+      // 전원 제출 시 자동 공개. 별도 스케줄러 없이 여기서 전이한다.
+      const [participants, submitted] = await Promise.all([
+        this.rooms.listParticipants(locked.roomId),
+        manager.count(Answer, { where: { roundId: locked.id } }),
+      ]);
+
+      const allSubmitted = submitted >= participants.length;
+      if (allSubmitted) {
+        locked.status = RoundStatus.REVEALED;
+        locked.revealedAt = new Date();
+        locked.revealedBy = null;
+        await manager.save(Round, locked);
+      }
+
+      return { submitted: true, allSubmitted };
     });
-    if (existing) {
-      throw new ConflictException('이미 제출했습니다. 수정할 수 없습니다');
-    }
-
-    await this.answers.save({
-      roundId: round.id,
-      participantId: participant.id,
-      text,
-    } as Answer);
-
-    // 전원 제출 시 자동 공개. 별도 스케줄러 없이 여기서 전이한다.
-    const [participants, submitted] = await Promise.all([
-      this.rooms.listParticipants(round.roomId),
-      this.answers.count({ where: { roundId: round.id } }),
-    ]);
-
-    const allSubmitted = submitted >= participants.length;
-    if (allSubmitted) {
-      round.status = RoundStatus.REVEALED;
-      round.revealedAt = new Date();
-      round.revealedBy = null;
-      await this.rounds.save(round);
-    }
-
-    return { submitted: true, allSubmitted };
   }
 
   async reveal(round: Round, byParticipantId: string | null): Promise<Round> {
-    if (round.status !== RoundStatus.OPEN) {
+    const revealedAt = new Date();
+    const result = await this.rounds.update(
+      { id: round.id, status: RoundStatus.OPEN },
+      { status: RoundStatus.REVEALED, revealedAt, revealedBy: byParticipantId },
+    );
+    if (result.affected === 0) {
       throw new ConflictException('이미 끝난 라운드입니다');
     }
-    round.status = RoundStatus.REVEALED;
-    round.revealedAt = new Date();
-    round.revealedBy = byParticipantId;
-    return this.rounds.save(round);
+    return this.findById(round.id);
   }
 
   async skip(round: Round): Promise<Round> {
-    if (round.status !== RoundStatus.OPEN) {
+    const result = await this.rounds.update(
+      { id: round.id, status: RoundStatus.OPEN },
+      { status: RoundStatus.SKIPPED },
+    );
+    if (result.affected === 0) {
       throw new ConflictException('이미 끝난 라운드입니다');
     }
-    round.status = RoundStatus.SKIPPED;
-    return this.rounds.save(round);
+    return this.findById(round.id);
   }
 
-  async listAnswers(roundId: string): Promise<Answer[]> {
-    return this.answers.find({ where: { roundId }, order: { createdAt: 'ASC' } });
+  /** 공개된 라운드의 답변만 반환한다. 열린 라운드에 부르면 거부한다. */
+  async listAnswers(round: Round): Promise<Answer[]> {
+    if (round.status === RoundStatus.OPEN) {
+      throw new ConflictException('아직 공개되지 않은 라운드입니다');
+    }
+    return this.answers.find({ where: { roundId: round.id }, order: { createdAt: 'ASC' } });
+  }
+
+  /** 내 답변 한 건. 미제출이면 null. 열린 라운드에서도 안전하다. */
+  async findMyAnswer(roundId: string, participantId: string): Promise<Answer | null> {
+    return this.answers.findOne({ where: { roundId, participantId } });
   }
 
   async submittedParticipantIds(roundId: string): Promise<Set<string>> {
