@@ -3344,7 +3344,7 @@ void bootstrap();
 - [ ] **Step 6: 실제 적재 확인**
 
 Run: `npm run cli -- seed`
-Expected: `축 값 60개 적재`, `골든 질문 20개 적재` 로그. 다시 실행하면 `새로 적재할 골든 질문 없음` 이 나와야 한다 (멱등).
+Expected: `축 값 55개 적재`(10+9 + 7+7+3 + 7+4 + 8), `골든 질문 20개 적재` 로그. 다시 실행하면 `새로 적재할 골든 질문 없음` 이 나와야 한다 (멱등).
 
 - [ ] **Step 7: 커밋**
 
@@ -4364,7 +4364,7 @@ git commit -m "feat: 검수 큐 CLI 와 실사용 통계 기반 골든 승격/�
 12개 태스크가 모두 끝나면 다음이 동작한다.
 
 ```bash
-npm run cli -- seed                                   # 축 60개 + 골든 20개 적재
+npm run cli -- seed                                   # 축 55개 + 골든 20개 적재
 npm run cli -- generate --format constraint --seeds 10  # 파이프라인 1회전
 npm run cli -- review                                 # 검수 큐 확인
 npm run cli -- review --approve 42 --reviewer jihun   # 승인
