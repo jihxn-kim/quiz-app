@@ -25,6 +25,17 @@ export class ReviewCommand extends CommandRunner {
         .split(',')
         .map((id) => id.trim())
         .filter((id) => id.length > 0);
+
+      if (ids.length === 0) {
+        this.logger.log('배포할 id 가 없습니다');
+        return;
+      }
+
+      const invalid = ids.filter((id) => !/^\d+$/.test(id));
+      if (invalid.length > 0) {
+        throw new Error(`잘못된 id: ${invalid.join(', ')}`);
+      }
+
       await this.review.publish(ids);
       this.logger.log(`배포: ${ids.join(', ')} (${ids.length}건이 live 가 됨)`);
       return;
