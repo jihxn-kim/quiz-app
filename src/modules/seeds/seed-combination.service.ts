@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { shuffle } from 'src/common/utils/shuffle';
 import { SeedCombination } from 'src/modules/questions/entities/seed-combination.entity';
 import { QuestionFormat } from 'src/modules/questions/enums/question-format.enum';
 import { AXIS_VALUES } from './data/axis-values';
@@ -53,9 +54,15 @@ export class SeedCombinationService {
       select: { seedHash: true },
     });
     const usedHashes = new Set(used.map((row) => row.seedHash));
-    return this.buildAll(format)
-      .filter((combo) => !usedHashes.has(combo.seedHash))
-      .slice(0, limit);
+    const unused = this.buildAll(format).filter(
+      (combo) => !usedHashes.has(combo.seedHash),
+    );
+    // 섞은 뒤 자른다. buildAll 은 데카르트 곱을 중첩 루프 순서로 만들기 때문에
+    // 그대로 slice 하면 배치 하나가 첫 번째 축 값으로 도배된다
+    // (constraint 앞 9개가 전부 "시각장애 × *"). 다양성이 죽는 것은 물론이고,
+    // 한 판에 같은 소재만 연달아 나오면 개별 질문이 안전 필터를 통과해도
+    // 그 소재에 집착하는 앱으로 읽힌다.
+    return shuffle(unused).slice(0, limit);
   }
 
   async markUsed(combos: SeedCombinationDto[]): Promise<void> {

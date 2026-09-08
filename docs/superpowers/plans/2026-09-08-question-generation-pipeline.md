@@ -46,6 +46,7 @@ src/
     config/env.schema.ts                   zod 환경변수 검증
     utils/cosine.ts                        코사인 유사도
     utils/concurrency.ts                   동시성 제한 map
+    utils/shuffle.ts                       Fisher-Yates 셔플
 
   infrastructure/
     database/database.module.ts            TypeORM 연결
@@ -761,6 +762,7 @@ git commit -m "feat: 질문 파이프라인 엔티티와 초기 마이그레이�
 ```typescript
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { shuffle } from 'src/common/utils/shuffle';
 import { SeedCombination } from 'src/modules/questions/entities/seed-combination.entity';
 import { QuestionFormat } from 'src/modules/questions/enums/question-format.enum';
 import { AXIS_VALUES } from './data/axis-values';
@@ -968,6 +970,7 @@ import { createHash } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { shuffle } from 'src/common/utils/shuffle';
 import { SeedCombination } from 'src/modules/questions/entities/seed-combination.entity';
 import { QuestionFormat } from 'src/modules/questions/enums/question-format.enum';
 import { AXIS_VALUES } from './data/axis-values';
@@ -1019,9 +1022,15 @@ export class SeedCombinationService {
       select: { seedHash: true },
     });
     const usedHashes = new Set(used.map((row) => row.seedHash));
-    return this.buildAll(format)
-      .filter((combo) => !usedHashes.has(combo.seedHash))
-      .slice(0, limit);
+    const unused = this.buildAll(format).filter(
+      (combo) => !usedHashes.has(combo.seedHash),
+    );
+    // 섞은 뒤 자른다. buildAll 은 데카르트 곱을 중첩 루프 순서로 만들기 때문에
+    // 그대로 slice 하면 배치 하나가 첫 번째 축 값으로 도배된다
+    // (constraint 앞 9개가 전부 "시각장애 × *"). 다양성이 죽는 것은 물론이고,
+    // 한 판에 같은 소재만 연달아 나오면 개별 질문이 안전 필터를 통과해도
+    // 그 소재에 집착하는 앱으로 읽힌다.
+    return shuffle(unused).slice(0, limit);
   }
 
   async markUsed(combos: SeedCombinationDto[]): Promise<void> {
@@ -2162,6 +2171,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { mapWithConcurrency } from 'src/common/utils/concurrency';
+import { shuffle } from 'src/common/utils/shuffle';
 import { LlmClient } from 'src/infrastructure/llm/llm.client';
 import { Question } from 'src/modules/questions/entities/question.entity';
 import { QuestionFormat } from 'src/modules/questions/enums/question-format.enum';
@@ -2231,8 +2241,7 @@ export class QuestionGeneratorService {
   }
 
   private sampleGolden(pool: string[]): string[] {
-    const shuffled = [...pool].sort(() => Math.random() - 0.5);
-    return shuffled.slice(0, GOLDEN_SAMPLE_SIZE);
+    return shuffle(pool).slice(0, GOLDEN_SAMPLE_SIZE);
   }
 
   private chunk<T>(items: T[], size: number): T[][] {
@@ -2712,6 +2721,7 @@ Expected: FAIL — 모듈 없음
 ```typescript
 import { Injectable, Logger } from '@nestjs/common';
 import { mapWithConcurrency } from 'src/common/utils/concurrency';
+import { shuffle } from 'src/common/utils/shuffle';
 import { LlmClient } from 'src/infrastructure/llm/llm.client';
 import { JudgeScores } from 'src/modules/questions/entities/question.entity';
 import {
@@ -3013,6 +3023,7 @@ Expected: FAIL — 모듈 없음
 ```typescript
 import { Injectable, Logger } from '@nestjs/common';
 import { mapWithConcurrency } from 'src/common/utils/concurrency';
+import { shuffle } from 'src/common/utils/shuffle';
 import { LlmClient } from 'src/infrastructure/llm/llm.client';
 import { SafetyVerdictsSchema } from './schemas/safety-verdict.schema';
 import {

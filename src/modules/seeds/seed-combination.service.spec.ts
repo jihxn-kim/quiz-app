@@ -118,6 +118,22 @@ describe('SeedCombinationService', () => {
         service.drawUnused(QuestionFormat.CONSTRAINT, 5),
       ).resolves.toEqual([]);
     });
+
+    it('셔플되어 한 축 값으로 도배되지 않는다', async () => {
+      // buildAll 은 데카르트 곱을 중첩 루프 순서로 만들어서, constraint 축
+      // 90개 조합 중 앞 9개는 전부 constraintAxis 가 같은 값이다(첫 값 x
+      // activity 9개). 셔플 없이 그대로 slice(0, 8) 하면 8개 전부 같은
+      // constraintAxis 값 하나로만 채워진다. 셔플하면 10개 값에 걸쳐 퍼진
+      // 90개 중 8개를 뽑으므로 전부 한 값일 확률은 사실상 0이다.
+      repo.find.mockResolvedValue([]);
+
+      const drawn = await service.drawUnused(QuestionFormat.CONSTRAINT, 8);
+
+      const distinctConstraints = new Set(
+        drawn.map((c) => c.axisValues.constraintAxis),
+      );
+      expect(distinctConstraints.size).toBeGreaterThan(1);
+    });
   });
 
   describe('markUsed', () => {
