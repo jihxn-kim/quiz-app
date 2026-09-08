@@ -26,7 +26,9 @@
 - judge 합격선: 안전 통과 **AND** 4개 항목 평균 **>= 3.5** **AND** `variance` **>= 3**.
 - 커밋 메시지는 **영어+한글만, 한자 금지**.
 - 기존 NestJS 프로젝트 관례를 따른다: `src/{common,infrastructure,modules}` 레이아웃, 파일명 `*.service.ts` / `*.entity.ts` / `*.module.ts`.
-- **import 는 `src/...` 절대 경로 별칭을 쓴다.** 이 별칭은 세 곳에서 해석된다 — jest 는 `moduleNameMapper`, `npm run cli` 와 `start:dev` 는 `ts-node -r tsconfig-paths/register`, 빌드 산출물은 `tsc-alias`. 셋 중 하나라도 빠지면 런타임에 `Cannot find module 'src/...'` 가 난다. 스크립트를 건드릴 때 이 세 경로를 깨지 않는지 확인할 것.
+- **모듈 경계를 넘는 import 는 `src/...` 절대 경로 별칭을 쓴다.** 같은 모듈 안 형제 폴더(예: `entities/` 에서 `../enums/`)는 상대 경로가 맞다 — 상대 경로는 별칭 재작성 대상이 아니라 빌드상 더 안전하기도 하다. 이 별칭은 세 곳에서 해석된다 — jest 는 `moduleNameMapper`, `npm run cli` 와 `start:dev` 는 `ts-node -r tsconfig-paths/register`, 빌드 산출물은 `tsc-alias`. 셋 중 하나라도 빠지면 런타임에 `Cannot find module 'src/...'` 가 난다. 스크립트를 건드릴 때 이 세 경로를 깨지 않는지 확인할 것.
+- **대리키 `id` 는 `bigint`(TypeScript 상 `string`) 다. 예외는 `generation_batches.id` 하나** — 배치 id 는 애플리케이션이 `randomUUID()` 로 부여하는 값이라 `varchar(64)` 이고, `questions.batch_id` 가 같은 타입으로 이를 참조한다.
+- **스펙 11번 DDL 의 FK 선언은 엔티티에 반영한다:** `questions.seed_hash -> seed_combinations.seed_hash`(nullable), `question_stats.question_id -> questions.id`. 참조 무결성을 애플리케이션에 떠넘기지 않는다.
 - **`package.json` 을 수정하는 태스크는 `package-lock.json` 도 함께 커밋한다.** 여러 태스크가 이어서 의존성을 추가하므로 락파일이 없으면 전이 의존성이 조용히 드리프트한다.
 
 ---
@@ -431,8 +433,18 @@ export class Question {
   @Column({ name: 'topic_tags', type: 'text', array: true, default: () => "'{}'" })
   topicTags!: string[];
 
+  // 스펙 11번 DDL 의 FK: seed_hash -> seed_combinations(seed_hash).
+  // 스칼라 컬럼을 쓰기 경로로 유지하고, 관계는 제약 생성 목적으로만 둔다.
   @Column({ name: 'seed_hash', type: 'varchar', length: 16, nullable: true })
   seedHash!: string | null;
+
+  @ManyToOne(() => SeedCombination, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({
+    name: 'seed_hash',
+    referencedColumnName: 'seedHash',
+    foreignKeyConstraintName: 'FK_questions_seed_combinations',
+  })
+  seedCombination?: SeedCombination | null;
 
   @Column({ type: 'real', array: true, nullable: true })
   embedding!: number[] | null;
@@ -530,8 +542,16 @@ import { Column, Entity, PrimaryColumn, UpdateDateColumn } from 'typeorm';
 
 @Entity('question_stats')
 export class QuestionStat {
+  // 스펙 11번 DDL 의 FK: question_id -> questions(id). PK 이면서 FK 다.
   @PrimaryColumn({ name: 'question_id', type: 'bigint' })
   questionId!: string;
+
+  @ManyToOne(() => Question, { onDelete: 'CASCADE' })
+  @JoinColumn({
+    name: 'question_id',
+    foreignKeyConstraintName: 'FK_question_stats_questions',
+  })
+  question?: Question;
 
   @Column({ type: 'int', default: 0 })
   served!: number;
@@ -3430,6 +3450,17 @@ describe('GenerationPipelineService', () => {
     ]);
   });
 
+  it('질문을 저장하기 전에 시드 조합을 먼저 기록한다 (FK 순서)', async () => {
+    const order: string[] = [];
+    seeds.markUsed.mockImplementation(async () => { order.push('markUsed'); });
+    questionRepo.save.mockImplementation(async (rows) => { order.push('save'); return rows; });
+    arrange([{ text: '질문?' }], [goodScores], [{ passed: true, reason: 'ok' }]);
+
+    await service.run(QuestionFormat.CONSTRAINT, 10);
+
+    expect(order).toEqual(['markUsed', 'save']);
+  });
+
   it('미사용 시드가 없으면 생성을 건너뛴다', async () => {
     seeds.drawUnused.mockResolvedValue([]);
 
@@ -3575,8 +3606,10 @@ export class GenerationPipelineService {
       ).length;
       batch.safetyPassed = verdicts.filter((v) => v?.passed === true).length;
 
-      if (rows.length > 0) await this.questions.save(rows);
+      // 순서 중요: questions.seed_hash 가 seed_combinations 를 참조하는 FK 이므로
+      // 조합을 먼저 기록해야 질문 저장이 FK 위반으로 실패하지 않는다.
       await this.seeds.markUsed(combos);
+      if (rows.length > 0) await this.questions.save(rows);
 
       batch.finishedAt = new Date();
       await this.batches.save(batch);
