@@ -6,17 +6,20 @@
 
 **Architecture:** NestJS 애플리케이션 하나 안에 CLI 커맨드(nest-commander)로 파이프라인을 돌린다. 순수 로직(조합 생성, 코사인 유사도, 합격선 판정)과 I/O(LLM, 임베딩, DB)를 서비스 경계로 분리해 LLM 없이 단위 테스트가 가능하게 한다. 모든 LLM 호출은 zod 스키마 기반 구조화 출력으로 받아 파싱 실패를 없앤다.
 
-**Tech Stack:** Node 20+, NestJS 11, TypeScript, TypeORM 0.3.26, PostgreSQL(Railway), zod 4, `@anthropic-ai/sdk`, `openai`(임베딩 전용), nest-commander, jest
+**Tech Stack:** Node 20+, NestJS 11, TypeScript, TypeORM 0.3.26, PostgreSQL(개발은 로컬 Docker, 배포는 Railway), zod 4, `openai`(생성·심사·임베딩 전부), nest-commander, jest
 
 **Spec:** `docs/superpowers/specs/2026-09-08-question-generation-design.md`
 
 ## Global Constraints
 
-- **LLM 모델은 `claude-opus-5` 고정.** 생성·judge·안전 필터 모두 동일. 상수 하나(`LLM_MODEL`)로 관리하고 하드코딩 금지.
-- **임베딩은 OpenAI `text-embedding-3-small`, 1536차원.** Anthropic 에는 임베딩 API 가 없다.
-- **모든 LLM 호출은 구조화 출력(`output_config.format` + `zodOutputFormat`)을 쓴다.** 프롬프트로 "JSON 만 출력해"라고 부탁하는 방식 금지.
+- **공급자는 OpenAI 하나다.** 생성·judge·안전 필터는 `gpt-5.5`, 임베딩은 `text-embedding-3-small`(1536차원). 모델 ID 는 상수(`LLM_MODEL`, `EMBEDDING_MODEL`)로 관리하고 하드코딩 금지. `@anthropic-ai/sdk` 는 쓰지 않는다.
+- **모든 LLM 호출은 JSON Schema strict 구조화 출력을 쓴다.** 프롬프트로 "JSON 만 출력해"라고 부탁하는 방식 금지.
+- **구조화 출력 스키마는 zod v4 의 `z.toJSONSchema` 로 만들고 strict 보정을 거친다.** `openai/helpers/zod` 의 `zodResponseFormat`/`zodTextFormat` 은 **쓰지 말 것** — 설치된 openai v4 헬퍼는 zod v3 내부구조를 가정해서 zod v4 스키마를 `type: "string"` 으로 망가뜨린다(실측 확인, 400 `invalid_json_schema`). strict 보정이란 모든 `type: "object"` 노드에 `additionalProperties: false` 를 넣고 `required` 에 전체 프로퍼티 키를 채우는 것이다.
 - **구조화 출력 스키마의 최상위는 반드시 객체다.** 배열이 필요하면 `{ items: [...] }` 처럼 객체로 감싼다.
-- **`response.stop_reason === 'refusal'` 을 항상 먼저 확인한다.** HTTP 200 으로 오므로 확인 없이 `content` 를 읽으면 안 된다.
+- **`message.refusal` 을 항상 먼저 확인한다.** 거절은 예외가 아니라 응답 필드로 오므로, 확인 없이 `content` 를 파싱하면 안 된다.
+- **`temperature` 를 건드리지 않는다.** `gpt-5.5` 는 기본값 1 이외의 값을 400 으로 거부한다(실측 확인). 다양성은 시드 조합과 요청마다 재샘플링하는 골든 few-shot 에서 나온다.
+- **토큰 상한 파라미터는 `max_completion_tokens` 다** (`max_tokens` 아님).
+- **캐시 지시 파라미터를 넣지 않는다.** 프롬프트 캐싱은 자동이다. 대신 시스템 프롬프트를 앞에, 매 요청 달라지는 시드 목록을 뒤에 둔다.
 - **Batches API 금지.** 동기 호출 + 동시성 4 + 지수 백오프 3회 재시도. (근거: 스펙 15번)
 - **pgvector 금지.** 임베딩은 `real[]`, 코사인 유사도는 애플리케이션에서 계산. (근거: 스펙 6번)
 - 유사도 임계값: 중복 탈락 **0.85 초과**, 자동 승인 신뢰선 **0.7 미만**.
@@ -45,8 +48,9 @@ src/
     database/database.module.ts            TypeORM 연결
     database/migrations/                   마이그레이션
     llm/llm.module.ts
-    llm/llm.client.ts                      Anthropic 래퍼 (구조화 출력 + 재시도 + refusal 처리)
+    llm/llm.client.ts                      OpenAI 래퍼 (구조화 출력 + 재시도 + refusal 처리)
     llm/embedding.client.ts                OpenAI 임베딩 래퍼
+    llm/json-schema.ts                     zod -> strict JSON Schema 변환
 
   modules/
     questions/
@@ -101,7 +105,7 @@ test/
 
 **Interfaces:**
 - Consumes: 없음 (첫 태스크)
-- Produces: `Env` 타입과 `validateEnv(raw: Record<string, unknown>): Env`. 이후 모든 모듈이 `ConfigService` 를 통해 `DATABASE_URL`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` 를 읽는다.
+- Produces: `Env` 타입과 `validateEnv(raw: Record<string, unknown>): Env`. 이후 모든 모듈이 `ConfigService` 를 통해 `DATABASE_URL` 과 `OPENAI_API_KEY` 를 읽는다.
 
 - [ ] **Step 1: 프로젝트 파일 생성**
 
@@ -122,7 +126,6 @@ test/
     "typeorm": "typeorm-ts-node-commonjs -d src/infrastructure/database/data-source.ts"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.68.0",
     "@nestjs/common": "^11.0.0",
     "@nestjs/config": "^4.0.2",
     "@nestjs/core": "^11.0.0",
@@ -223,7 +226,6 @@ coverage/
 
 ```
 DATABASE_URL=postgresql://postgres:password@localhost:5432/quiz_app
-ANTHROPIC_API_KEY=sk-ant-...
 OPENAI_API_KEY=sk-...
 NODE_ENV=development
 ```
@@ -238,7 +240,6 @@ import { validateEnv } from './env.schema';
 describe('validateEnv', () => {
   const valid = {
     DATABASE_URL: 'postgresql://user:pw@host:5432/db',
-    ANTHROPIC_API_KEY: 'sk-ant-test',
     OPENAI_API_KEY: 'sk-test',
     NODE_ENV: 'development',
   };
@@ -259,9 +260,9 @@ describe('validateEnv', () => {
     expect(() => validateEnv(missing)).toThrow(/DATABASE_URL/);
   });
 
-  it('ANTHROPIC_API_KEY 가 빈 문자열이면 에러를 던진다', () => {
-    expect(() => validateEnv({ ...valid, ANTHROPIC_API_KEY: '' })).toThrow(
-      /ANTHROPIC_API_KEY/,
+  it('OPENAI_API_KEY 가 빈 문자열이면 에러를 던진다', () => {
+    expect(() => validateEnv({ ...valid, OPENAI_API_KEY: '' })).toThrow(
+      /OPENAI_API_KEY/,
     );
   });
 });
@@ -281,7 +282,6 @@ import { z } from 'zod';
 
 const envSchema = z.object({
   DATABASE_URL: z.string().min(1),
-  ANTHROPIC_API_KEY: z.string().min(1),
   OPENAI_API_KEY: z.string().min(1),
   NODE_ENV: z
     .enum(['development', 'test', 'production'])
@@ -1081,21 +1081,51 @@ git commit -m "feat: 시드 축 테이블과 조합 생성기 추가"
 
 ---
 
-## Task 4: LLM 클라이언트
+## Task 4: LLM 클라이언트 (OpenAI)
 
 **Files:**
 - Create: `src/common/utils/concurrency.ts`
+- Create: `src/infrastructure/llm/json-schema.ts`
 - Create: `src/infrastructure/llm/llm.client.ts`
 - Create: `src/infrastructure/llm/llm.module.ts`
-- Test: `src/common/utils/concurrency.spec.ts`, `src/infrastructure/llm/llm.client.spec.ts`
+- Modify: `package.json` (`@anthropic-ai/sdk` 제거), `src/common/config/env.schema.ts`, `src/common/config/env.schema.spec.ts`, `.env.example`
+- Test: `src/common/utils/concurrency.spec.ts`, `src/infrastructure/llm/json-schema.spec.ts`, `src/infrastructure/llm/llm.client.spec.ts`
 
 **Interfaces:**
 - Consumes: `ConfigService` (Task 1)
 - Produces:
   - `mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T, index: number) => Promise<R>): Promise<R[]>`
-  - `LLM_MODEL = 'claude-opus-5'` 상수
-  - `class LlmRefusalError extends Error { readonly category: string | null }`
-  - `LlmClient.completeJson<T>(args: { system: string; user: string; schema: z.ZodType<T>; maxTokens?: number }): Promise<T>`
+  - `toStrictJsonSchema(schema: z.ZodType): Record<string, unknown>`
+  - `LLM_MODEL = 'gpt-5.5'` 상수
+  - `class LlmRefusalError extends Error { readonly refusal: string }`
+  - `LlmClient.completeJson<T>(args: { system: string; user: string; schema: z.ZodType<T>; schemaName: string; maxTokens?: number }): Promise<T>`
+
+**이 태스크가 왜 이렇게 생겼는지 (실측 근거):** 컨트롤러가 실제 API 로 확인한 것들이다. `openai/helpers/zod` 의 `zodResponseFormat` 은 이 프로젝트의 zod v4 스키마를 `type: "string"` 으로 망가뜨려 400 `invalid_json_schema` 를 낸다. `gpt-5.5` 는 `temperature` 를 기본값 1 이외로 주면 400 이다. 토큰 상한은 `max_completion_tokens` 다. 거절은 예외가 아니라 `message.refusal` 필드로 온다. 아래 구현은 이 네 가지를 전부 반영한 것이니 "더 관용적인 SDK 헬퍼가 있을 텐데" 하고 바꾸지 말 것.
+
+- [ ] **Step 0: Anthropic 잔재 제거**
+
+Task 1 이 남긴 것들을 지운다. `@anthropic-ai/sdk` 는 zod v4 와 peer 충돌을 일으켜 `npm install` 이 `--legacy-peer-deps` 없이는 실패한다.
+
+```bash
+npm uninstall @anthropic-ai/sdk
+```
+
+`src/common/config/env.schema.ts` 의 `envSchema` 에서 `ANTHROPIC_API_KEY: z.string().min(1),` 줄을 지운다.
+
+`src/common/config/env.schema.spec.ts` 에서 `valid` 객체의 `ANTHROPIC_API_KEY: 'sk-ant-test',` 줄을 지우고, 네 번째 테스트를 다음으로 교체한다:
+
+```typescript
+  it('OPENAI_API_KEY 가 빈 문자열이면 에러를 던진다', () => {
+    expect(() => validateEnv({ ...valid, OPENAI_API_KEY: '' })).toThrow(
+      /OPENAI_API_KEY/,
+    );
+  });
+```
+
+`.env.example` 에서 `ANTHROPIC_API_KEY=sk-ant-...` 줄을 지운다.
+
+Run: `npx jest src/common/config` 
+Expected: PASS (4 tests). 그리고 `npm install` 이 `--legacy-peer-deps` 없이 통과해야 한다.
 
 - [ ] **Step 1: 동시성 유틸 테스트 작성**
 
@@ -1172,7 +1202,117 @@ export async function mapWithConcurrency<T, R>(
 }
 ```
 
-- [ ] **Step 4: LLM 클라이언트 테스트 작성**
+- [ ] **Step 4: JSON Schema 변환기 테스트 작성**
+
+`src/infrastructure/llm/json-schema.spec.ts`:
+
+```typescript
+import { z } from 'zod';
+import { toStrictJsonSchema } from './json-schema';
+
+describe('toStrictJsonSchema', () => {
+  it('모든 객체 노드에 additionalProperties: false 를 넣는다', () => {
+    const schema = z.object({ items: z.array(z.object({ text: z.string() })) });
+    const json = toStrictJsonSchema(schema) as any;
+
+    expect(json.additionalProperties).toBe(false);
+    expect(json.properties.items.items.additionalProperties).toBe(false);
+  });
+
+  it('모든 객체 노드의 required 에 전체 프로퍼티 키를 채운다', () => {
+    const schema = z.object({
+      a: z.string(),
+      b: z.number(),
+      nested: z.object({ c: z.string(), d: z.boolean() }),
+    });
+    const json = toStrictJsonSchema(schema) as any;
+
+    expect(json.required.sort()).toEqual(['a', 'b', 'nested']);
+    expect(json.properties.nested.required.sort()).toEqual(['c', 'd']);
+  });
+
+  it('optional 필드도 required 에 넣는다 (strict 모드 요구사항)', () => {
+    const schema = z.object({ a: z.string(), b: z.string().optional() });
+    const json = toStrictJsonSchema(schema) as any;
+
+    expect(json.required.sort()).toEqual(['a', 'b']);
+  });
+
+  it('최상위 타입이 object 다', () => {
+    const schema = z.object({ items: z.array(z.string()) });
+    expect((toStrictJsonSchema(schema) as any).type).toBe('object');
+  });
+
+  it('enum 을 보존한다', () => {
+    const schema = z.object({ tag: z.enum(['a', 'b']) });
+    const json = toStrictJsonSchema(schema) as any;
+
+    expect(json.properties.tag.enum.sort()).toEqual(['a', 'b']);
+  });
+
+  it('배열 안의 원시 타입은 건드리지 않는다', () => {
+    const schema = z.object({ tags: z.array(z.string()) });
+    const json = toStrictJsonSchema(schema) as any;
+
+    expect(json.properties.tags.items.type).toBe('string');
+    expect(json.properties.tags.items.additionalProperties).toBeUndefined();
+  });
+});
+```
+
+- [ ] **Step 5: 테스트가 실패하는지 확인**
+
+Run: `npx jest src/infrastructure/llm/json-schema`
+Expected: FAIL — `Cannot find module './json-schema'`
+
+- [ ] **Step 6: JSON Schema 변환기 구현**
+
+`src/infrastructure/llm/json-schema.ts`:
+
+```typescript
+import { z } from 'zod';
+
+/**
+ * zod 스키마를 OpenAI 구조화 출력 strict 모드가 받는 JSON Schema 로 바꾼다.
+ *
+ * `openai/helpers/zod` 의 zodResponseFormat / zodTextFormat 은 쓰지 않는다.
+ * 그 헬퍼들은 zod v3 내부구조를 가정하고 있어서 이 프로젝트의 zod v4 스키마를
+ * `type: "string"` 으로 망가뜨리고 400 invalid_json_schema 를 낸다.
+ *
+ * strict 모드는 모든 객체에 additionalProperties: false 와
+ * "전체 프로퍼티가 required" 를 요구한다. optional 필드도 예외가 아니다.
+ */
+export function toStrictJsonSchema(schema: z.ZodType): Record<string, unknown> {
+  const json = z.toJSONSchema(schema, { target: 'draft-2020-12' }) as Record<
+    string,
+    unknown
+  >;
+  strictify(json);
+  return json;
+}
+
+function strictify(node: unknown): void {
+  if (node === null || typeof node !== 'object') return;
+
+  if (Array.isArray(node)) {
+    for (const item of node) strictify(item);
+    return;
+  }
+
+  const obj = node as Record<string, unknown>;
+  if (obj.type === 'object') {
+    obj.additionalProperties = false;
+    const properties = obj.properties;
+    if (properties !== null && typeof properties === 'object') {
+      obj.required = Object.keys(properties as Record<string, unknown>);
+    }
+  }
+
+  for (const value of Object.values(obj)) strictify(value);
+}
+```
+
+- [ ] **Step 7: LLM 클라이언트 테스트 작성**
 
 `src/infrastructure/llm/llm.client.spec.ts`:
 
@@ -1182,114 +1322,167 @@ import { LlmClient, LlmRefusalError } from './llm.client';
 
 const schema = z.object({ items: z.array(z.string()) });
 
-function buildClient(parse: jest.Mock): LlmClient {
-  const client = new LlmClient({ getOrThrow: () => 'sk-ant-test' } as never);
-  (client as unknown as { anthropic: unknown }).anthropic = {
-    messages: { parse },
+function buildClient(create: jest.Mock): LlmClient {
+  const client = new LlmClient({ getOrThrow: () => 'sk-test' } as never);
+  (client as unknown as { openai: unknown }).openai = {
+    chat: { completions: { create } },
   };
   return client;
 }
 
+function reply(content: unknown, refusal: string | null = null) {
+  return {
+    choices: [{ message: { content: JSON.stringify(content), refusal } }],
+  };
+}
+
 describe('LlmClient.completeJson', () => {
-  it('파싱된 출력을 반환한다', async () => {
-    const parse = jest.fn().mockResolvedValue({
-      stop_reason: 'end_turn',
-      parsed_output: { items: ['a', 'b'] },
-    });
+  it('검증된 출력을 반환한다', async () => {
+    const create = jest.fn().mockResolvedValue(reply({ items: ['a', 'b'] }));
     await expect(
-      buildClient(parse).completeJson({ system: 's', user: 'u', schema }),
+      buildClient(create).completeJson({
+        system: 's', user: 'u', schema, schemaName: 'test',
+      }),
     ).resolves.toEqual({ items: ['a', 'b'] });
   });
 
-  it('시스템 프롬프트에 캐시 제어를 붙인다', async () => {
-    const parse = jest.fn().mockResolvedValue({
-      stop_reason: 'end_turn',
-      parsed_output: { items: [] },
+  it('strict json_schema 형식으로 요청한다', async () => {
+    const create = jest.fn().mockResolvedValue(reply({ items: [] }));
+    await buildClient(create).completeJson({
+      system: 's', user: 'u', schema, schemaName: 'test',
     });
-    await buildClient(parse).completeJson({ system: 's', user: 'u', schema });
-    expect(parse.mock.calls[0][0].system).toEqual([
-      { type: 'text', text: 's', cache_control: { type: 'ephemeral' } },
+
+    const params = create.mock.calls[0][0];
+    expect(params.response_format.type).toBe('json_schema');
+    expect(params.response_format.json_schema.strict).toBe(true);
+    expect(params.response_format.json_schema.name).toBe('test');
+    expect(params.response_format.json_schema.schema.type).toBe('object');
+  });
+
+  it('temperature 를 보내지 않는다 (gpt-5.5 는 기본값만 허용)', async () => {
+    const create = jest.fn().mockResolvedValue(reply({ items: [] }));
+    await buildClient(create).completeJson({
+      system: 's', user: 'u', schema, schemaName: 'test',
+    });
+
+    expect(create.mock.calls[0][0]).not.toHaveProperty('temperature');
+  });
+
+  it('토큰 상한을 max_completion_tokens 로 보낸다', async () => {
+    const create = jest.fn().mockResolvedValue(reply({ items: [] }));
+    await buildClient(create).completeJson({
+      system: 's', user: 'u', schema, schemaName: 'test', maxTokens: 500,
+    });
+
+    const params = create.mock.calls[0][0];
+    expect(params.max_completion_tokens).toBe(500);
+    expect(params).not.toHaveProperty('max_tokens');
+  });
+
+  it('system 을 앞에, user 를 뒤에 보낸다 (프롬프트 캐시 접두 안정성)', async () => {
+    const create = jest.fn().mockResolvedValue(reply({ items: [] }));
+    await buildClient(create).completeJson({
+      system: 'SYS', user: 'USR', schema, schemaName: 'test',
+    });
+
+    expect(create.mock.calls[0][0].messages).toEqual([
+      { role: 'system', content: 'SYS' },
+      { role: 'user', content: 'USR' },
     ]);
   });
 
-  it('stop_reason 이 refusal 이면 LlmRefusalError 를 던진다', async () => {
-    const parse = jest.fn().mockResolvedValue({
-      stop_reason: 'refusal',
-      stop_details: { type: 'refusal', category: 'harmful', explanation: '거부' },
-      parsed_output: null,
+  it('message.refusal 이 있으면 LlmRefusalError 를 던진다', async () => {
+    const create = jest.fn().mockResolvedValue({
+      choices: [{ message: { content: null, refusal: '이 요청은 도울 수 없습니다' } }],
     });
     await expect(
-      buildClient(parse).completeJson({ system: 's', user: 'u', schema }),
+      buildClient(create).completeJson({
+        system: 's', user: 'u', schema, schemaName: 'test',
+      }),
     ).rejects.toBeInstanceOf(LlmRefusalError);
-  });
-
-  it('parsed_output 이 null 이면 에러를 던진다', async () => {
-    const parse = jest.fn().mockResolvedValue({
-      stop_reason: 'end_turn',
-      parsed_output: null,
-    });
-    await expect(
-      buildClient(parse).completeJson({ system: 's', user: 'u', schema }),
-    ).rejects.toThrow(/파싱/);
-  });
-
-  it('일시적 실패는 재시도하고 성공하면 결과를 돌려준다', async () => {
-    const parse = jest
-      .fn()
-      .mockRejectedValueOnce(new Error('503'))
-      .mockResolvedValue({ stop_reason: 'end_turn', parsed_output: { items: ['ok'] } });
-    await expect(
-      buildClient(parse).completeJson({ system: 's', user: 'u', schema }),
-    ).resolves.toEqual({ items: ['ok'] });
-    expect(parse).toHaveBeenCalledTimes(2);
-  });
-
-  it('재시도를 모두 소진하면 마지막 에러를 던진다', async () => {
-    const parse = jest.fn().mockRejectedValue(new Error('계속 실패'));
-    await expect(
-      buildClient(parse).completeJson({ system: 's', user: 'u', schema }),
-    ).rejects.toThrow('계속 실패');
-    expect(parse).toHaveBeenCalledTimes(3);
   });
 
   it('refusal 은 재시도하지 않는다', async () => {
-    const parse = jest.fn().mockResolvedValue({
-      stop_reason: 'refusal',
-      stop_details: { type: 'refusal', category: null },
-      parsed_output: null,
+    const create = jest.fn().mockResolvedValue({
+      choices: [{ message: { content: null, refusal: '거절' } }],
     });
     await expect(
-      buildClient(parse).completeJson({ system: 's', user: 'u', schema }),
+      buildClient(create).completeJson({
+        system: 's', user: 'u', schema, schemaName: 'test',
+      }),
     ).rejects.toBeInstanceOf(LlmRefusalError);
-    expect(parse).toHaveBeenCalledTimes(1);
+    expect(create).toHaveBeenCalledTimes(1);
+  });
+
+  it('스키마에 맞지 않는 응답이면 에러를 던진다', async () => {
+    const create = jest.fn().mockResolvedValue(reply({ wrong: 'shape' }));
+    await expect(
+      buildClient(create).completeJson({
+        system: 's', user: 'u', schema, schemaName: 'test',
+      }),
+    ).rejects.toThrow(/스키마/);
+  });
+
+  it('content 가 비어 있으면 에러를 던진다', async () => {
+    const create = jest.fn().mockResolvedValue({
+      choices: [{ message: { content: null, refusal: null } }],
+    });
+    await expect(
+      buildClient(create).completeJson({
+        system: 's', user: 'u', schema, schemaName: 'test',
+      }),
+    ).rejects.toThrow(/content/);
+  });
+
+  it('일시적 실패는 재시도하고 성공하면 결과를 돌려준다', async () => {
+    const create = jest
+      .fn()
+      .mockRejectedValueOnce(new Error('503'))
+      .mockResolvedValue(reply({ items: ['ok'] }));
+    await expect(
+      buildClient(create).completeJson({
+        system: 's', user: 'u', schema, schemaName: 'test',
+      }),
+    ).resolves.toEqual({ items: ['ok'] });
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+
+  it('재시도를 모두 소진하면 마지막 에러를 던진다', async () => {
+    const create = jest.fn().mockRejectedValue(new Error('계속 실패'));
+    await expect(
+      buildClient(create).completeJson({
+        system: 's', user: 'u', schema, schemaName: 'test',
+      }),
+    ).rejects.toThrow('계속 실패');
+    expect(create).toHaveBeenCalledTimes(3);
   });
 });
 ```
 
-- [ ] **Step 5: 테스트가 실패하는지 확인**
+- [ ] **Step 8: 테스트가 실패하는지 확인**
 
-Run: `npx jest src/infrastructure/llm`
+Run: `npx jest src/infrastructure/llm/llm.client`
 Expected: FAIL — `Cannot find module './llm.client'`
 
-- [ ] **Step 6: LLM 클라이언트 구현**
+- [ ] **Step 9: LLM 클라이언트 구현**
 
 `src/infrastructure/llm/llm.client.ts`:
 
 ```typescript
-import Anthropic from '@anthropic-ai/sdk';
-import { zodOutputFormat } from '@anthropic-ai/sdk/helpers/zod';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import OpenAI from 'openai';
 import { z } from 'zod';
+import { toStrictJsonSchema } from './json-schema';
 
-export const LLM_MODEL = 'claude-opus-5';
+export const LLM_MODEL = 'gpt-5.5';
 const MAX_ATTEMPTS = 3;
 const BASE_BACKOFF_MS = 1_000;
 
-/** 안전 분류기가 요청을 거절한 경우. 재시도해도 결과가 같으므로 즉시 던진다. */
+/** 모델이 요청을 거절한 경우. 재시도해도 결과가 같으므로 즉시 던진다. */
 export class LlmRefusalError extends Error {
-  constructor(readonly category: string | null) {
-    super(`LLM 이 요청을 거절했습니다 (category: ${category ?? 'unknown'})`);
+  constructor(readonly refusal: string) {
+    super(`LLM 이 요청을 거절했습니다: ${refusal}`);
     this.name = 'LlmRefusalError';
   }
 }
@@ -1297,49 +1490,65 @@ export class LlmRefusalError extends Error {
 @Injectable()
 export class LlmClient {
   private readonly logger = new Logger(LlmClient.name);
-  private readonly anthropic: Anthropic;
+  private readonly openai: OpenAI;
 
   constructor(config: ConfigService) {
-    this.anthropic = new Anthropic({
-      apiKey: config.getOrThrow<string>('ANTHROPIC_API_KEY'),
+    this.openai = new OpenAI({
+      apiKey: config.getOrThrow<string>('OPENAI_API_KEY'),
     });
   }
 
   /**
    * 구조화 출력으로 JSON 을 받는다.
    * schema 의 최상위는 반드시 객체여야 한다 (배열이면 { items: [...] } 로 감쌀 것).
+   *
+   * temperature 는 보내지 않는다 — gpt-5.5 는 기본값 1 이외를 400 으로 거부한다.
+   * 프롬프트 캐싱은 자동이므로 캐시 지시 파라미터도 없다. 대신 변하지 않는
+   * system 을 앞에, 매 요청 달라지는 user 를 뒤에 두어 접두를 안정시킨다.
    */
   async completeJson<T>(args: {
     system: string;
     user: string;
     schema: z.ZodType<T>;
+    schemaName: string;
     maxTokens?: number;
   }): Promise<T> {
     let lastError: unknown;
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
       try {
-        const response = await this.anthropic.messages.parse({
+        const response = await this.openai.chat.completions.create({
           model: LLM_MODEL,
-          max_tokens: args.maxTokens ?? 16_000,
-          system: [
-            {
-              type: 'text',
-              text: args.system,
-              cache_control: { type: 'ephemeral' },
-            },
+          max_completion_tokens: args.maxTokens ?? 16_000,
+          messages: [
+            { role: 'system', content: args.system },
+            { role: 'user', content: args.user },
           ],
-          messages: [{ role: 'user', content: args.user }],
-          output_config: { format: zodOutputFormat(args.schema) },
+          response_format: {
+            type: 'json_schema',
+            json_schema: {
+              name: args.schemaName,
+              strict: true,
+              schema: toStrictJsonSchema(args.schema),
+            },
+          },
         });
 
-        if (response.stop_reason === 'refusal') {
-          throw new LlmRefusalError(response.stop_details?.category ?? null);
+        const message = response.choices[0]?.message;
+        if (message?.refusal) {
+          throw new LlmRefusalError(message.refusal);
         }
-        if (response.parsed_output == null) {
-          throw new Error('LLM 응답을 스키마로 파싱하지 못했습니다');
+        if (!message?.content) {
+          throw new Error('LLM 응답에 content 가 없습니다');
         }
-        return response.parsed_output;
+
+        const parsed = args.schema.safeParse(JSON.parse(message.content));
+        if (!parsed.success) {
+          throw new Error(
+            `LLM 응답이 스키마에 맞지 않습니다: ${parsed.error.message}`,
+          );
+        }
+        return parsed.data;
       } catch (error) {
         if (error instanceof LlmRefusalError) throw error;
         lastError = error;
@@ -1372,21 +1581,21 @@ import { LlmClient } from './llm.client';
 export class LlmModule {}
 ```
 
-- [ ] **Step 7: 테스트 통과 확인**
+- [ ] **Step 10: 테스트 통과 확인**
 
-Run: `npx jest src/common/utils src/infrastructure/llm`
-Expected: PASS (11 tests)
+Run: `npx jest src/common/utils src/infrastructure/llm src/common/config`
+Expected: PASS (21 tests: 동시성 4 + JSON Schema 6 + 클라이언트 11), 출력 깨끗
 
-- [ ] **Step 8: 실제 API 스모크 확인**
+- [ ] **Step 11: 실제 API 스모크**
 
-`output_config` + `zodOutputFormat` 조합이 실제로 동작하는지 한 번만 확인한다. 이후 태스크가 전부 이 조합에 의존하므로 여기서 막히면 뒤가 전부 막힌다.
+목으로는 알 수 없는 것 — 실제 모델이 이 스키마 형식을 받아주는지 — 을 한 번 확인한다. 이후 태스크가 전부 이 경로에 의존한다.
 
 `scripts/smoke-llm.ts`:
 
 ```typescript
 import 'dotenv/config';
-import { z } from 'zod';
 import { ConfigService } from '@nestjs/config';
+import { z } from 'zod';
 import { LlmClient } from '../src/infrastructure/llm/llm.client';
 
 const schema = z.object({
@@ -1395,13 +1604,14 @@ const schema = z.object({
 
 async function main(): Promise<void> {
   const client = new LlmClient(
-    new ConfigService({ ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY }),
+    new ConfigService({ OPENAI_API_KEY: process.env.OPENAI_API_KEY }),
   );
   const result = await client.completeJson({
     system: '너는 테스트용 응답기다.',
     user: '아무 한국어 문장 2개를 items 로 반환해라. tag 는 test 로 채운다.',
     schema,
-    maxTokens: 1_000,
+    schemaName: 'smoke',
+    maxTokens: 2_000,
   });
   console.log(JSON.stringify(result, null, 2));
 }
@@ -1412,13 +1622,13 @@ void main();
 Run: `npx ts-node -r tsconfig-paths/register scripts/smoke-llm.ts`
 Expected: `items` 에 객체 2개가 담긴 JSON 출력.
 
-만약 `output_config` 가 거부되면 즉시 멈추고 보고한다. 프롬프트로 JSON 을 부탁하는 방식으로 우회하지 않는다 — Global Constraints 위반이다.
+`max_completion_tokens` 를 너무 작게 잡으면 추론 토큰만 쓰고 content 가 비어 돌아온다. 스모크가 "content 가 없습니다" 로 실패하면 상한을 올려서 다시 시도하고, 그 값을 보고에 적는다.
 
-- [ ] **Step 9: 커밋**
+- [ ] **Step 12: 커밋**
 
 ```bash
-git add src/common/utils src/infrastructure/llm scripts/
-git commit -m "feat: Anthropic LLM 클라이언트와 동시성 유틸 추가"
+git add package.json package-lock.json .env.example src/ scripts/
+git commit -m "feat: OpenAI LLM 클라이언트와 구조화 출력 스키마 변환기 추가"
 ```
 
 ---
@@ -1667,11 +1877,15 @@ git commit -m "feat: OpenAI 임베딩 클라이언트와 코사인 유사도 유
 ```typescript
 import { z } from 'zod';
 
+import { TOPIC_TAGS } from '../prompts/shared.prompt';
+
 export const GeneratedQuestionsSchema = z.object({
   items: z.array(
     z.object({
       text: z.string().min(5),
-      topicTags: z.array(z.string()).min(1),
+      // 자유 문자열로 두면 모델이 허용 목록 밖의 태그를 지어낸다(실측 확인).
+      // 스키마에 열거형으로 박아 구조화 출력 단계에서 강제한다.
+      topicTags: z.array(z.enum(TOPIC_TAGS)).min(1),
       seedHash: z.string(),
     }),
   ),
@@ -1960,6 +2174,7 @@ export class QuestionGeneratorService {
           }),
           user: buildUserPrompt({ combos: chunk, variantsPerSeed }),
           schema: GeneratedQuestionsSchema,
+          schemaName: 'generated_questions',
         });
         return result.items;
       } catch (error) {
@@ -2499,6 +2714,7 @@ export class JudgeService {
           system: JUDGE_SYSTEM_PROMPT,
           user: buildJudgeUserPrompt(chunk.texts),
           schema: JudgeScoresSchema,
+          schemaName: 'judge_scores',
         });
         items = response.items;
       } catch (error) {
@@ -2768,6 +2984,7 @@ export class SafetyService {
           system: SAFETY_SYSTEM_PROMPT,
           user: buildSafetyUserPrompt(chunk.texts),
           schema: SafetyVerdictsSchema,
+          schemaName: 'safety_verdicts',
         });
         for (const item of response.items) {
           if (item.index < 0 || item.index >= chunk.texts.length) continue;
@@ -2811,7 +3028,7 @@ jest.setTimeout(180_000);
 describe('안전 필터 회귀 (실제 LLM 호출)', () => {
   const service = new SafetyService(
     new LlmClient(
-      new ConfigService({ ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY }),
+      new ConfigService({ OPENAI_API_KEY: process.env.OPENAI_API_KEY }),
     ),
   );
 
