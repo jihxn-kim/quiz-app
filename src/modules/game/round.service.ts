@@ -8,6 +8,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { Question } from 'src/modules/questions/entities/question.entity';
+import { QuestionStatsService } from 'src/modules/stats/question-stats.service';
 import { Answer } from './entities/answer.entity';
 import { Participant } from './entities/participant.entity';
 import { Room } from './entities/room.entity';
@@ -33,6 +34,7 @@ export class RoundService {
     private readonly pool: QuestionPoolService,
     private readonly rooms: RoomService,
     private readonly dataSource: DataSource,
+    private readonly stats: QuestionStatsService,
   ) {}
 
   async start(room: Room): Promise<{ round: Round; question: Question }> {
@@ -52,6 +54,8 @@ export class RoundService {
       sequence,
       status: RoundStatus.OPEN,
     } as Round);
+
+    await this.recordQuietly(() => this.stats.recordServed(question.id), 'served');
 
     return { round, question };
   }
@@ -76,7 +80,7 @@ export class RoundService {
       throw new ForbiddenException('이 방의 참가자가 아닙니다');
     }
 
-    return this.dataSource.transaction(async (manager) => {
+    const result = await this.dataSource.transaction<RoundSubmissionResult>(async (manager) => {
       const locked = await manager.findOne(Round, {
         where: { id: round.id },
         lock: { mode: 'pessimistic_write' },
@@ -122,6 +126,15 @@ export class RoundService {
 
       return { submitted: true, allSubmitted };
     });
+
+    // 트랜잭션 커밋 후에 통계를 기록한다. 트랜잭션 안에서 부르면 listAnswers 가
+    // 다른 커넥션으로 읽어 방금 커밋되지 않은 마지막 답변을 못 보고, 행 잠금도
+    // 통계 기록 동안 계속 잡고 있게 된다.
+    if (result.allSubmitted) {
+      await this.recordRevealed(await this.findById(round.id));
+    }
+
+    return result;
   }
 
   async reveal(round: Round, byParticipantId: string | null): Promise<Round> {
@@ -133,7 +146,9 @@ export class RoundService {
     if (result.affected === 0) {
       throw new ConflictException('이미 끝난 라운드입니다');
     }
-    return this.findById(round.id);
+    const revealed = await this.findById(round.id);
+    await this.recordRevealed(revealed);
+    return revealed;
   }
 
   async skip(round: Round): Promise<Round> {
@@ -144,6 +159,7 @@ export class RoundService {
     if (result.affected === 0) {
       throw new ConflictException('이미 끝난 라운드입니다');
     }
+    await this.recordQuietly(() => this.stats.recordSkipped(round.questionId), 'skipped');
     return this.findById(round.id);
   }
 
@@ -166,5 +182,27 @@ export class RoundService {
       select: { participantId: true },
     });
     return new Set(rows.map((row) => row.participantId));
+  }
+
+  /**
+   * 통계는 부가 기능이다. 실패해도 게임 흐름을 막지 않는다 —
+   * 사람들이 하던 게임이 통계 때문에 멈추면 안 된다.
+   */
+  private async recordQuietly(action: () => Promise<void>, what: string): Promise<void> {
+    try {
+      await action();
+    } catch (error) {
+      this.logger.warn(`통계 기록 실패 (${what}): ${String(error)}`);
+    }
+  }
+
+  private async recordRevealed(round: Round): Promise<void> {
+    await this.recordQuietly(async () => {
+      const answers = await this.listAnswers(round);
+      // 답변이 2개 미만이면 분산도를 잴 수 없다. 0 으로 기록하면
+      // "의견이 안 갈렸다" 로 읽혀 그 질문이 부당하게 은퇴 후보가 된다.
+      if (answers.length < 2) return;
+      await this.stats.recordAnswers(round.questionId, answers.map((a) => a.text));
+    }, 'answers');
   }
 }

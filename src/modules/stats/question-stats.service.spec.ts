@@ -10,7 +10,7 @@ import { QuestionStatsService, MIN_SERVED, MIN_LIVE_POOL } from './question-stat
 describe('QuestionStatsService', () => {
   let service: QuestionStatsService;
   const embedding = { embed: jest.fn() };
-  const statRepo = { findOne: jest.fn(), save: jest.fn(), find: jest.fn() };
+  const statRepo = { findOne: jest.fn(), save: jest.fn(), find: jest.fn(), create: jest.fn() };
   const questionRepo = { update: jest.fn(), find: jest.fn(), count: jest.fn() };
 
   beforeEach(async () => {
@@ -187,6 +187,37 @@ describe('QuestionStatsService', () => {
       );
       // ids.length(1) 이 아니라 실제로 반영된 건수(0)를 반환해야 한다.
       expect(promoted).toBe(0);
+    });
+  });
+
+  describe('recordServed / recordSkipped', () => {
+    it('통계 행이 없으면 만들어서 1로 시작한다', async () => {
+      statRepo.findOne.mockResolvedValue(null);
+      statRepo.create.mockImplementation((r: unknown) => r);
+
+      await service.recordServed('42');
+
+      expect(statRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({ questionId: '42', served: 1 }),
+      );
+    });
+
+    it('기존 행이 있으면 증가시킨다', async () => {
+      statRepo.findOne.mockResolvedValue({ questionId: '42', served: 5, skipped: 2, completed: 3 });
+
+      await service.recordServed('42');
+
+      expect(statRepo.save).toHaveBeenCalledWith(expect.objectContaining({ served: 6 }));
+    });
+
+    it('스킵은 skipped 만 올린다', async () => {
+      statRepo.findOne.mockResolvedValue({ questionId: '42', served: 5, skipped: 2, completed: 3 });
+
+      await service.recordSkipped('42');
+
+      const saved = statRepo.save.mock.calls[0][0];
+      expect(saved.skipped).toBe(3);
+      expect(saved.served).toBe(5);
     });
   });
 

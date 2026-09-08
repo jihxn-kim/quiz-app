@@ -30,14 +30,26 @@ export class QuestionStatsService {
     private readonly questions: Repository<Question>,
   ) {}
 
+  /** 라운드가 시작되어 이 질문이 사람들에게 노출됐다. */
+  async recordServed(questionId: string): Promise<void> {
+    const stat = await this.loadOrCreate(questionId);
+    stat.served += 1;
+    await this.stats.save(stat);
+  }
+
+  /** 방장이 이 질문을 넘겼다. */
+  async recordSkipped(questionId: string): Promise<void> {
+    const stat = await this.loadOrCreate(questionId);
+    stat.skipped += 1;
+    await this.stats.save(stat);
+  }
+
   /** 한 방이 전원 답변으로 끝났을 때 호출한다. */
   async recordAnswers(questionId: string, answers: string[]): Promise<void> {
     if (answers.length === 0) return;
 
     const vectors = await this.embeddings.embed(answers);
-    const stat =
-      (await this.stats.findOne({ where: { questionId } })) ??
-      this.stats.create({ questionId, served: 0, completed: 0, skipped: 0 });
+    const stat = await this.loadOrCreate(questionId);
 
     // 누적 평균으로 갱신한다. 덮어쓰면 MIN_SERVED 표본 가드가 무의미해진다 —
     // 200번 서빙된 질문이 마지막 한 방의 분산만으로 승격/은퇴될 수 있다.
@@ -130,6 +142,13 @@ export class QuestionStatsService {
     await this.questions.update(ids, { status: QuestionStatus.RETIRED, golden: false });
     this.logger.log(`은퇴 처리 ${ids.length}건`);
     return ids.length;
+  }
+
+  private async loadOrCreate(questionId: string): Promise<QuestionStat> {
+    return (
+      (await this.stats.findOne({ where: { questionId } })) ??
+      this.stats.create({ questionId, served: 0, completed: 0, skipped: 0 })
+    );
   }
 
   /** 분산도 기준 상위/하위 컷오프 값 */

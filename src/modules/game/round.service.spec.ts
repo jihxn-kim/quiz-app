@@ -7,6 +7,7 @@ import { Participant } from './entities/participant.entity';
 import { Room } from './entities/room.entity';
 import { Round } from './entities/round.entity';
 import { RoundStatus } from './enums/round-status.enum';
+import { QuestionStatsService } from 'src/modules/stats/question-stats.service';
 import { QuestionPoolService } from './question-pool.service';
 import { RoomService } from './room.service';
 import { RoundService } from './round.service';
@@ -30,6 +31,7 @@ describe('RoundService', () => {
   // 쓰이므로 첫 번째 인자(엔티티 클래스)로 호출을 구분해 검증한다.
   const manager = { findOne: jest.fn(), save: jest.fn((_entity, data) => data), count: jest.fn() };
   const dataSource = { transaction: jest.fn((run: (m: typeof manager) => unknown) => run(manager)) };
+  const stats = { recordServed: jest.fn(), recordSkipped: jest.fn(), recordAnswers: jest.fn() };
 
   beforeEach(async () => {
     jest.clearAllMocks();
@@ -41,6 +43,7 @@ describe('RoundService', () => {
         { provide: QuestionPoolService, useValue: pool },
         { provide: RoomService, useValue: rooms },
         { provide: DataSource, useValue: dataSource },
+        { provide: QuestionStatsService, useValue: stats },
       ],
     }).compile();
     service = moduleRef.get(RoundService);
@@ -61,6 +64,16 @@ describe('RoundService', () => {
       const { round } = await service.start({ id: '1' } as Room);
 
       expect(round.sequence).toBe(4);
+    });
+
+    it('라운드를 시작하면 served 를 올린다', async () => {
+      roundRepo.findOne.mockResolvedValue(null);
+      roundRepo.count.mockResolvedValue(0);
+      pool.drawForRoom.mockResolvedValue({ id: '42', text: '질문?' });
+
+      await service.start({ id: '1' } as Room);
+
+      expect(stats.recordServed).toHaveBeenCalledWith('42');
     });
   });
 
@@ -141,6 +154,8 @@ describe('RoundService', () => {
         .mockResolvedValueOnce(null); // 기존 답변 없음
       rooms.listParticipants.mockResolvedValue([{ id: '1' }, { id: '2' }]);
       manager.count.mockResolvedValue(2); // 제출 후 2명
+      // 커밋 후 통계를 위해 라운드를 다시 읽는다 (REVEALED 상태로).
+      roundRepo.findOne.mockResolvedValue(openRound({ status: RoundStatus.REVEALED }));
 
       const result = await service.submit(openRound(), { id: '2', roomId: '1' } as Participant, '답');
 
@@ -190,6 +205,21 @@ describe('RoundService', () => {
       expect(round.revealedBy).toBe('1');
       expect(round.revealedAt).toBeInstanceOf(Date);
     });
+
+    it('답변이 2개 미만이면 recordAnswers 를 부르지 않는다', async () => {
+      answerRepo.find.mockResolvedValue([{ participantId: '1', text: '혼자' }]);
+      await service.reveal(openRound(), '1');
+      expect(stats.recordAnswers).not.toHaveBeenCalled();
+    });
+
+    it('답변이 2개 이상이면 recordAnswers 를 부른다', async () => {
+      answerRepo.find.mockResolvedValue([
+        { participantId: '1', text: '답1' },
+        { participantId: '2', text: '답2' },
+      ]);
+      await service.reveal(openRound(), '1');
+      expect(stats.recordAnswers).toHaveBeenCalledWith('42', ['답1', '답2']);
+    });
   });
 
   describe('skip', () => {
@@ -212,6 +242,16 @@ describe('RoundService', () => {
         { status: RoundStatus.SKIPPED },
       );
       expect(round.status).toBe(RoundStatus.SKIPPED);
+    });
+
+    it('스킵하면 skipped 를 올린다', async () => {
+      await service.skip(openRound());
+      expect(stats.recordSkipped).toHaveBeenCalledWith('42');
+    });
+
+    it('통계가 실패해도 게임은 진행된다', async () => {
+      stats.recordSkipped.mockRejectedValue(new Error('DB 다운'));
+      await expect(service.skip(openRound())).resolves.toBeDefined();
     });
   });
 
