@@ -50,12 +50,11 @@ describe('SeedCombinationService', () => {
   });
 
   describe('buildAll', () => {
-    it('constraint 는 제약 x 행위 전조합을 만든다', () => {
-      const combos = service.buildAll(QuestionFormat.CONSTRAINT);
-      const axes = AXIS_VALUES[QuestionFormat.CONSTRAINT];
-      const expected =
-        axes.constraintAxis.length * axes.activityAxis.length;
-      expect(combos).toHaveLength(expected);
+    it('형식별 조합 수가 고정값과 일치한다', () => {
+      expect(service.buildAll(QuestionFormat.CONSTRAINT)).toHaveLength(90);
+      expect(service.buildAll(QuestionFormat.DILEMMA)).toHaveLength(63);
+      expect(service.buildAll(QuestionFormat.PROJECTION)).toHaveLength(28);
+      expect(service.buildAll(QuestionFormat.CONFESSION)).toHaveLength(8);
     });
 
     it('중복 해시를 만들지 않는다', () => {
@@ -68,6 +67,25 @@ describe('SeedCombinationService', () => {
       for (const combo of combos) {
         expect(combo.axisValues.miseryA).not.toBe(combo.axisValues.miseryB);
       }
+    });
+
+    it('confession 은 축이 하나여도 조합을 만든다', () => {
+      const combos = service.buildAll(QuestionFormat.CONFESSION);
+      expect(combos).toHaveLength(8);
+      for (const combo of combos) {
+        expect(Object.keys(combo.axisValues)).toEqual(['tabooAxis']);
+        expect(combo.axisValues.tabooAxis).toBeTruthy();
+      }
+      expect(new Set(combos.map((c) => c.seedHash)).size).toBe(8);
+    });
+
+    it('projection 은 상황 x 제한 전조합을 만든다', () => {
+      const combos = service.buildAll(QuestionFormat.PROJECTION);
+      expect(combos).toHaveLength(28);
+      for (const combo of combos) {
+        expect(Object.keys(combo.axisValues).sort()).toEqual(['limitAxis', 'scenarioAxis']);
+      }
+      expect(new Set(combos.map((c) => c.seedHash)).size).toBe(28);
     });
   });
 
@@ -99,6 +117,28 @@ describe('SeedCombinationService', () => {
       await expect(
         service.drawUnused(QuestionFormat.CONSTRAINT, 5),
       ).resolves.toEqual([]);
+    });
+  });
+
+  describe('markUsed', () => {
+    it('빈 배열이면 저장소를 건드리지 않는다', async () => {
+      await service.markUsed([]);
+      expect(repo.upsert).not.toHaveBeenCalled();
+    });
+
+    it('seedHash 를 충돌 키로 upsert 한다', async () => {
+      const combos = service.buildAll(QuestionFormat.CONSTRAINT).slice(0, 2);
+
+      await service.markUsed(combos);
+
+      const [rows, conflictKeys] = repo.upsert.mock.calls[0];
+      expect(conflictKeys).toEqual(['seedHash']);
+      expect(rows).toHaveLength(2);
+      expect(rows[0]).toEqual({
+        seedHash: combos[0].seedHash,
+        format: QuestionFormat.CONSTRAINT,
+        axisValues: combos[0].axisValues,
+      });
     });
   });
 });
