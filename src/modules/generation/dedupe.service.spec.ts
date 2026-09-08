@@ -106,4 +106,24 @@ describe('DedupeService', () => {
 
     expect(result.kept[0].embedding).toEqual([1, 0]);
   });
+
+  describe('임베딩 실패', () => {
+    it('임베딩이 실패해도 배치를 통째로 잃지 않고 후보 전부를 null 임베딩으로 통과시킨다', async () => {
+      embedding.embed.mockRejectedValue(new Error('임베딩 API 오류'));
+
+      const result = await service.filter([q('A?'), q('B?')]);
+
+      expect(result.kept).toHaveLength(2);
+      expect(result.kept.map((k) => k.embedding)).toEqual([null, null]);
+      expect(result.dropped).toEqual([]);
+    });
+
+    it('임베딩 실패 시에는 기존 풀 조회도, 중복 비교도 하지 않는다', async () => {
+      embedding.embed.mockRejectedValue(new Error('임베딩 API 오류'));
+
+      await service.filter([q('A?')]);
+
+      expect(repo.find).not.toHaveBeenCalled();
+    });
+  });
 });

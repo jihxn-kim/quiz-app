@@ -111,9 +111,15 @@ export class GenerationPipelineService {
       ).length;
       batch.safetyPassed = verdicts.filter((v) => v?.passed === true).length;
 
+      // 생성 후보가 실제로 나온 시드만 소모한다. 요청이 전부 실패해 아무것도
+      // 생성되지 않았다면 그 시드는 다시 뽑힐 수 있어야 한다 — 조합 공간이
+      // 작은 형식(confession 8개)은 실패한 배치 두 번이면 영원히 고갈된다.
+      const usedHashes = new Set(generated.map((item) => item.seedHash));
+      const usedCombos = combos.filter((combo) => usedHashes.has(combo.seedHash));
+
       // 순서 중요: questions.seed_hash 가 seed_combinations 를 참조하는 FK 이므로
       // 조합을 먼저 기록해야 질문 저장이 FK 위반으로 실패하지 않는다.
-      await this.seeds.markUsed(combos);
+      await this.seeds.markUsed(usedCombos);
       if (rows.length > 0) await this.questions.save(rows);
 
       batch.finishedAt = new Date();
@@ -139,7 +145,7 @@ export class GenerationPipelineService {
   }
 
   private buildRow(
-    item: { text: string; topicTags: string[]; seedHash: string; embedding: number[] },
+    item: { text: string; topicTags: string[]; seedHash: string; embedding: number[] | null },
     batchId: string,
     format: QuestionFormat,
     overrides: Partial<Question>,

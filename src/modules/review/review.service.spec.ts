@@ -63,25 +63,64 @@ describe('ReviewService', () => {
     });
   });
 
+  describe('listPending', () => {
+    it('safetyPassed 가 null 인 항목이 먼저 오도록, createdAt ASC 를 보조 정렬로 정렬한다', async () => {
+      repo.find.mockResolvedValue([]);
+
+      await service.listPending();
+
+      expect(repo.find).toHaveBeenCalledWith(
+        expect.objectContaining({
+          order: {
+            safetyPassed: { direction: 'ASC', nulls: 'FIRST' },
+            createdAt: 'ASC',
+          },
+        }),
+      );
+    });
+  });
+
   describe('approve', () => {
-    it('상태를 approved 로 바꾸고 검수자를 기록한다', async () => {
+    it('pending 상태인 질문만 승인 대상으로 삼아 상태를 바꾸고 검수자를 기록한다', async () => {
+      repo.update.mockResolvedValue({ affected: 1, raw: [], generatedMaps: [] });
+
       await service.approve('7', 'jihun');
 
-      expect(repo.update).toHaveBeenCalledWith('7', expect.objectContaining({
-        status: QuestionStatus.APPROVED,
-        reviewedBy: 'jihun',
-      }));
+      expect(repo.update).toHaveBeenCalledWith(
+        { id: '7', status: QuestionStatus.PENDING },
+        expect.objectContaining({
+          status: QuestionStatus.APPROVED,
+          reviewedBy: 'jihun',
+        }),
+      );
+    });
+
+    it('대상 행이 없으면(이미 처리됐거나 존재하지 않으면) 에러를 던진다', async () => {
+      repo.update.mockResolvedValue({ affected: 0, raw: [], generatedMaps: [] });
+
+      await expect(service.approve('999', 'jihun')).rejects.toThrow('999');
     });
   });
 
   describe('reject', () => {
-    it('상태를 rejected 로 바꾸고 사유를 남긴다', async () => {
+    it('pending 상태인 질문만 반려 대상으로 삼아 상태를 rejected 로 바꾸고 사유를 남긴다', async () => {
+      repo.update.mockResolvedValue({ affected: 1, raw: [], generatedMaps: [] });
+
       await service.reject('7', 'jihun', '톤이 조롱에 가까움');
 
-      expect(repo.update).toHaveBeenCalledWith('7', expect.objectContaining({
-        status: QuestionStatus.REJECTED,
-        safetyReason: '톤이 조롱에 가까움',
-      }));
+      expect(repo.update).toHaveBeenCalledWith(
+        { id: '7', status: QuestionStatus.PENDING },
+        expect.objectContaining({
+          status: QuestionStatus.REJECTED,
+          safetyReason: '톤이 조롱에 가까움',
+        }),
+      );
+    });
+
+    it('대상 행이 없으면 에러를 던진다', async () => {
+      repo.update.mockResolvedValue({ affected: 0, raw: [], generatedMaps: [] });
+
+      await expect(service.reject('999', 'jihun', '사유')).rejects.toThrow('999');
     });
   });
 });

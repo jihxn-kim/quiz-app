@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { Command, CommandRunner, Option } from 'nest-commander';
+import { Question } from 'src/modules/questions/entities/question.entity';
 import { ReviewService } from '../review.service';
 
 interface ReviewOptions {
@@ -51,10 +52,25 @@ export class ReviewCommand extends CommandRunner {
         : '판정없음';
       lines.push(`[${question.id}] (${score}) ${question.text}`);
       if (scores?.reason) lines.push(`      근거: ${scores.reason}`);
-      if (question.safetyReason) lines.push(`      안전: ${question.safetyReason}`);
+      lines.push(`      ${this.formatSafetyLine(question)}`);
       lines.push('');
     }
     console.log(lines.join('\n'));
+  }
+
+  /**
+   * safetyPassed 가 null 인 경우를 통과와 구분해서 반드시 보여준다.
+   * 여기서 안전 판정을 숨기면, null(미판정)과 true(통과)가 화면에서
+   * 똑같이 보여서 사람 검수 게이트가 형식만 남는다.
+   */
+  private formatSafetyLine(question: Question): string {
+    if (question.safetyPassed === null) {
+      return '안전: 미판정 — 안전 필터가 평가하지 못함 (반드시 사람이 판단)';
+    }
+    const verdict = question.safetyPassed ? '통과' : '탈락';
+    return question.safetyReason
+      ? `안전: ${verdict} (${question.safetyReason})`
+      : `안전: ${verdict}`;
   }
 
   @Option({ flags: '--approve <id>', description: '승인할 질문 id' })

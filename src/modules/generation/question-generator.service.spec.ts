@@ -1,8 +1,10 @@
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { In } from 'typeorm';
 import { LlmClient } from 'src/infrastructure/llm/llm.client';
 import { Question } from 'src/modules/questions/entities/question.entity';
 import { QuestionFormat } from 'src/modules/questions/enums/question-format.enum';
+import { QuestionStatus } from 'src/modules/questions/enums/question-status.enum';
 import { QuestionGeneratorService } from './question-generator.service';
 
 const COMBOS = Array.from({ length: 25 }, (_, i) => ({
@@ -75,14 +77,18 @@ describe('QuestionGeneratorService', () => {
     expect(new Set(systems).size).toBeGreaterThan(1);
   });
 
-  it('해당 형식의 골든 질문만 예시로 읽는다', async () => {
+  it('해당 형식의, live/approved 상태인 골든 질문만 예시로 읽는다', async () => {
     llm.completeJson.mockResolvedValue({ items: [] });
 
     await service.generate(QuestionFormat.DILEMMA, COMBOS.slice(0, 1), 3);
 
     expect(questionRepo.find).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: { format: QuestionFormat.DILEMMA, golden: true },
+        where: {
+          format: QuestionFormat.DILEMMA,
+          golden: true,
+          status: In([QuestionStatus.LIVE, QuestionStatus.APPROVED]),
+        },
       }),
     );
   });

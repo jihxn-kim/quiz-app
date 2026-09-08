@@ -133,6 +133,70 @@ describe('GenerationPipelineService', () => {
     expect(order).toEqual(['markUsed', 'save']);
   });
 
+  it('생성 후보가 없는 시드는 markUsed 로 소모하지 않는다', async () => {
+    seeds.drawUnused.mockResolvedValue([
+      { seedHash: 'used', format: QuestionFormat.CONSTRAINT, axisValues: {} },
+      { seedHash: 'unused', format: QuestionFormat.CONSTRAINT, axisValues: {} },
+    ]);
+    // generator 는 'used' 시드에 대해서만 후보를 만들었다 (예: 청크 하나가
+    // 실패해 'unused' 몫은 통째로 비었다).
+    generator.generate.mockResolvedValue([
+      { text: '질문?', topicTags: ['연애'], seedHash: 'used' },
+    ]);
+    dedupe.filter.mockResolvedValue({
+      kept: [{ text: '질문?', topicTags: ['연애'], seedHash: 'used', embedding: [1, 0] }],
+      dropped: [],
+    });
+    judge.score.mockResolvedValue([goodScores]);
+    safety.check.mockResolvedValue([{ passed: true, reason: 'ok' }]);
+
+    await service.run(QuestionFormat.CONSTRAINT, 10);
+
+    expect(seeds.markUsed).toHaveBeenCalledWith([
+      { seedHash: 'used', format: QuestionFormat.CONSTRAINT, axisValues: {} },
+    ]);
+  });
+
+  it('생성이 모두 실패하면 어떤 시드도 소모하지 않는다', async () => {
+    seeds.drawUnused.mockResolvedValue([
+      { seedHash: 'h1', format: QuestionFormat.CONSTRAINT, axisValues: {} },
+      { seedHash: 'h2', format: QuestionFormat.CONSTRAINT, axisValues: {} },
+    ]);
+    // QuestionGeneratorService 는 실패한 청크를 빈 배열로 흡수해 돌려주므로,
+    // 요청이 전부 실패한 경우 generate() 는 빈 배열을 반환한다.
+    generator.generate.mockResolvedValue([]);
+    dedupe.filter.mockResolvedValue({ kept: [], dropped: [] });
+    judge.score.mockResolvedValue([]);
+    safety.check.mockResolvedValue([]);
+
+    await service.run(QuestionFormat.CONSTRAINT, 10);
+
+    expect(seeds.markUsed).toHaveBeenCalledWith([]);
+  });
+
+  it('임베딩 실패로 dedupe 가 null 임베딩을 돌려줘도 저장은 정상 진행되고 pending 으로 남는다', async () => {
+    seeds.drawUnused.mockResolvedValue([
+      { seedHash: 'h', format: QuestionFormat.CONSTRAINT, axisValues: {} },
+    ]);
+    generator.generate.mockResolvedValue([
+      { text: '질문?', topicTags: ['연애'], seedHash: 'h' },
+    ]);
+    // 임베딩 실패로 DedupeService.filter 가 null 임베딩을 붙여 그대로 통과시킨 상황.
+    dedupe.filter.mockResolvedValue({
+      kept: [{ text: '질문?', topicTags: ['연애'], seedHash: 'h', embedding: null }],
+      dropped: [],
+    });
+    judge.score.mockResolvedValue([goodScores]);
+    safety.check.mockResolvedValue([{ passed: true, reason: 'ok' }]);
+
+    const summary = await service.run(QuestionFormat.CONSTRAINT, 10);
+
+    const saved = questionRepo.save.mock.calls[0][0];
+    expect(saved[0].embedding).toBeNull();
+    expect(saved[0].status).toBe(QuestionStatus.PENDING);
+    expect(summary.saved).toBe(1);
+  });
+
   it('미사용 시드가 없으면 생성을 건너뛴다', async () => {
     seeds.drawUnused.mockResolvedValue([]);
 
