@@ -1,4 +1,13 @@
-import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
   ApiCreatedResponse,
@@ -239,6 +248,9 @@ export class GameController {
     @CurrentParticipant() me: Participant,
   ): Promise<RoundOpenResponseDto | RoundRevealedResponseDto> {
     const round = await this.rounds.findById(id);
+    const room = await this.roomOf(round.roomId);
+    this.rooms.assertMember(room, me);
+
     const question = await this.questions.findOne({ where: { id: round.questionId } });
     const participants = await this.rooms.listParticipants(round.roomId);
     const questionDto = { id: round.questionId, text: question?.text ?? '' };
@@ -267,7 +279,6 @@ export class GameController {
     const answers = await this.rounds.listAnswers(round);
     const byId = new Map(participants.map((p) => [p.id, p]));
     const answeredIds = new Set(answers.map((a) => a.participantId));
-    const room = await this.roomOf(round.roomId);
 
     return {
       roundId: round.id,
@@ -340,6 +351,7 @@ export class GameController {
 | 409 | 이미 공개됨 |`,
   })
   @ApiOkResponse({ type: RoundRevealedResponseDto })
+  @HttpCode(HttpStatus.OK)
   async revealRound(
     @Param('id') id: string,
     @CurrentParticipant() me: Participant,
@@ -372,6 +384,7 @@ export class GameController {
 | 409 | 이미 공개됨 |`,
   })
   @ApiOkResponse({ type: SkipRoundResponseDto })
+  @HttpCode(HttpStatus.OK)
   async skipRound(
     @Param('id') id: string,
     @CurrentParticipant() me: Participant,
