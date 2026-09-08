@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { mapWithConcurrency } from 'src/common/utils/concurrency';
+import { shuffle } from 'src/common/utils/shuffle';
 import { LlmClient } from 'src/infrastructure/llm/llm.client';
 import { Question } from 'src/modules/questions/entities/question.entity';
 import { QuestionFormat } from 'src/modules/questions/enums/question-format.enum';
@@ -71,8 +72,7 @@ export class QuestionGeneratorService {
   }
 
   private sampleGolden(pool: string[]): string[] {
-    const shuffled = [...pool].sort(() => Math.random() - 0.5);
-    return shuffled.slice(0, GOLDEN_SAMPLE_SIZE);
+    return shuffle(pool).slice(0, GOLDEN_SAMPLE_SIZE);
   }
 
   private chunk<T>(items: T[], size: number): T[][] {
