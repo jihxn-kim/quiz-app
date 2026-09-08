@@ -156,6 +156,10 @@ describe('RoundService', () => {
       manager.count.mockResolvedValue(2); // 제출 후 2명
       // 커밋 후 통계를 위해 라운드를 다시 읽는다 (REVEALED 상태로).
       roundRepo.findOne.mockResolvedValue(openRound({ status: RoundStatus.REVEALED }));
+      answerRepo.find.mockResolvedValue([
+        { participantId: '1', text: '답1' },
+        { participantId: '2', text: '답2' },
+      ]);
 
       const result = await service.submit(openRound(), { id: '2', roomId: '1' } as Participant, '답');
 
@@ -164,6 +168,7 @@ describe('RoundService', () => {
         Round,
         expect.objectContaining({ status: RoundStatus.REVEALED, revealedBy: null }),
       );
+      expect(stats.recordAnswers).toHaveBeenCalledWith('42', ['답1', '답2']);
     });
 
     it('아직 남았으면 공개하지 않는다', async () => {
@@ -172,11 +177,67 @@ describe('RoundService', () => {
         .mockResolvedValueOnce(null); // 기존 답변 없음
       rooms.listParticipants.mockResolvedValue([{ id: '1' }, { id: '2' }, { id: '3' }]);
       manager.count.mockResolvedValue(2);
+      // recordRevealed 가 (버그로) 불려도 통계 경로 자체는 성공하도록 스텁해둔다.
+      // 그래야 "recordAnswers 가 안 불렸다" 는 아래 단언이, 통계 경로가 어차피
+      // 무관한 이유로 실패해서가 아니라 정말로 recordRevealed 가 호출되지 않아서
+      // 통과했다고 믿을 수 있다.
+      roundRepo.findOne.mockResolvedValue(openRound({ status: RoundStatus.REVEALED }));
+      answerRepo.find.mockResolvedValue([
+        { participantId: '1', text: '답1' },
+        { participantId: '2', text: '답2' },
+      ]);
 
       const result = await service.submit(openRound(), { id: '2', roomId: '1' } as Participant, '답');
 
       expect(result.allSubmitted).toBe(false);
       expect(manager.save).not.toHaveBeenCalledWith(Round, expect.anything());
+      expect(stats.recordAnswers).not.toHaveBeenCalled();
+    });
+
+    it('공개 시점 답변이 1건뿐이면 recordAnswers 를 부르지 않는다 (분산도 가드)', async () => {
+      manager.findOne
+        .mockResolvedValueOnce(openRound()) // 잠긴 라운드
+        .mockResolvedValueOnce(null); // 기존 답변 없음
+      rooms.listParticipants.mockResolvedValue([{ id: '1' }]);
+      manager.count.mockResolvedValue(1); // 제출 후 1명(전원)
+      roundRepo.findOne.mockResolvedValue(openRound({ status: RoundStatus.REVEALED }));
+      answerRepo.find.mockResolvedValue([{ participantId: '1', text: '혼자' }]);
+
+      const result = await service.submit(openRound(), { id: '1', roomId: '1' } as Participant, '답');
+
+      expect(result.allSubmitted).toBe(true);
+      expect(stats.recordAnswers).not.toHaveBeenCalled();
+    });
+
+    it('통계 기록(recordAnswers)이 실패해도 submit() 은 정상 반환한다', async () => {
+      manager.findOne
+        .mockResolvedValueOnce(openRound()) // 잠긴 라운드
+        .mockResolvedValueOnce(null); // 기존 답변 없음
+      rooms.listParticipants.mockResolvedValue([{ id: '1' }, { id: '2' }]);
+      manager.count.mockResolvedValue(2);
+      roundRepo.findOne.mockResolvedValue(openRound({ status: RoundStatus.REVEALED }));
+      answerRepo.find.mockResolvedValue([
+        { participantId: '1', text: '답1' },
+        { participantId: '2', text: '답2' },
+      ]);
+      stats.recordAnswers.mockRejectedValue(new Error('통계 DB 다운'));
+
+      await expect(
+        service.submit(openRound(), { id: '2', roomId: '1' } as Participant, '답'),
+      ).resolves.toEqual({ submitted: true, allSubmitted: true });
+    });
+
+    it('F1: 공개 후 통계용 findById 가 실패해도 submit() 은 정상 반환한다', async () => {
+      manager.findOne
+        .mockResolvedValueOnce(openRound()) // 잠긴 라운드
+        .mockResolvedValueOnce(null); // 기존 답변 없음
+      rooms.listParticipants.mockResolvedValue([{ id: '1' }, { id: '2' }]);
+      manager.count.mockResolvedValue(2);
+      roundRepo.findOne.mockRejectedValue(new Error('커넥션 풀 고갈'));
+
+      await expect(
+        service.submit(openRound(), { id: '2', roomId: '1' } as Participant, '답'),
+      ).resolves.toEqual({ submitted: true, allSubmitted: true });
     });
   });
 

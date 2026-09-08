@@ -131,7 +131,7 @@ export class RoundService {
     // 다른 커넥션으로 읽어 방금 커밋되지 않은 마지막 답변을 못 보고, 행 잠금도
     // 통계 기록 동안 계속 잡고 있게 된다.
     if (result.allSubmitted) {
-      await this.recordRevealed(await this.findById(round.id));
+      await this.recordRevealed(round.id);
     }
 
     return result;
@@ -147,7 +147,7 @@ export class RoundService {
       throw new ConflictException('이미 끝난 라운드입니다');
     }
     const revealed = await this.findById(round.id);
-    await this.recordRevealed(revealed);
+    await this.recordRevealed(revealed.id);
     return revealed;
   }
 
@@ -196,8 +196,9 @@ export class RoundService {
     }
   }
 
-  private async recordRevealed(round: Round): Promise<void> {
+  private async recordRevealed(roundId: string): Promise<void> {
     await this.recordQuietly(async () => {
+      const round = await this.findById(roundId);
       const answers = await this.listAnswers(round);
       // 답변이 2개 미만이면 분산도를 잴 수 없다. 0 으로 기록하면
       // "의견이 안 갈렸다" 로 읽혀 그 질문이 부당하게 은퇴 후보가 된다.
