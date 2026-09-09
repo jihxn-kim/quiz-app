@@ -34,10 +34,12 @@ import {
   StartRoundResponseDto,
 } from './dto/round.dto';
 import { SubmitAnswerDto, SubmitAnswerResponseDto } from './dto/submit-answer.dto';
+import { CastVoteDto, CastVoteResponseDto } from './dto/vote.dto';
 import { Participant } from './entities/participant.entity';
 import { RoundStatus } from './enums/round-status.enum';
 import { RoomService } from './room.service';
 import { RoundService } from './round.service';
+import { VoteService } from './vote.service';
 
 @ApiTags('game')
 @Controller()
@@ -45,6 +47,7 @@ export class GameController {
   constructor(
     private readonly rooms: RoomService,
     private readonly rounds: RoundService,
+    private readonly votes: VoteService,
     @InjectRepository(Question) private readonly questions: Repository<Question>,
   ) {}
 
@@ -129,10 +132,23 @@ export class GameController {
     { "id": "2", "nickname": "민수", "isHost": false }
   ],
   "currentRound": {              // 라운드가 하나도 없으면 null
-    "id": "10", "sequence": 3, "status": "open"
+    "id": "10",
+    "sequence": 3,
+    "status": "open",            // open | revealed | skipped
+    "votingClosedAt": null       // 투표가 끝난 시각(ISO 8601). 진행 중이면 null
   }
 }
-\`\`\``,
+\`\`\`
+
+**지금 무엇을 폴링해야 하는지를 이 응답으로 정한다.** 한 번에 하나만 폴링하면 된다.
+
+| currentRound | 폴링 대상 |
+| --- | --- |
+| \`null\` | 이 방 — 누가 들어오는지, 방장이 첫 질문을 시작하는지 |
+| \`status: "open"\` | 라운드 \`GET /rounds/:id\` — 제출 현황과 자동 공개 |
+| \`status: "revealed"\` + \`votingClosedAt: null\` | 라운드 — 투표 단계다. 투표 인원과 투표 종료가 계속 바뀐다 |
+| \`status: "revealed"\` + \`votingClosedAt\` 이 채워짐 | 이 방 — 이 라운드는 더 바뀌지 않는다. 방장이 다음 질문을 시작하는 것을 감지해야 한다 |
+| \`status: "skipped"\` | 이 방 |`,
   })
   @ApiOkResponse({ type: RoomStateResponseDto })
   async getRoom(
@@ -151,7 +167,14 @@ export class GameController {
       isHost: room.hostParticipantId === me.id,
       participants: participants.map((p) => this.toParticipantDto(p, room.hostParticipantId)),
       currentRound: latest
-        ? { id: latest.id, sequence: latest.sequence, status: latest.status }
+        ? {
+            id: latest.id,
+            sequence: latest.sequence,
+            status: latest.status,
+            // 공개된 라운드는 투표가 닫힐 때까지 계속 변한다. 클라이언트가
+            // 라운드 폴링을 언제 멈춰야 하는지 이 값으로 판단한다.
+            votingClosedAt: latest.votingClosedAt ? latest.votingClosedAt.toISOString() : null,
+          }
         : null,
     };
   }
@@ -210,8 +233,9 @@ export class GameController {
   "status": "open",
   "question": { "id": "42", "text": "..." },
   "participants": [
-    { "id": "1", "nickname": "지훈", "submitted": true },
-    { "id": "2", "nickname": "민수", "submitted": false }
+    // answerLength 는 제출한 답의 글자 수. 텍스트 없이 블러 블록의 길이만 그리는 용도다
+    { "id": "1", "nickname": "지훈", "submitted": true, "answerLength": 12 },
+    { "id": "2", "nickname": "민수", "submitted": false, "answerLength": null }
   ],
   "mySubmission": { "text": "촉감으로 확인할 것 같아" }   // 내 것만. 미제출이면 null
 }
@@ -223,15 +247,31 @@ export class GameController {
   "roundId": "11",
   "status": "revealed",
   "question": { "id": "42", "text": "..." },
-  "revealedAt": "2026-09-08T12:34:56.000Z",
+  "revealedAt": "2026-09-08T12:34:56.000Z",   // 카드 공개 연출의 기준 시각
   "revealedBy": { "id": "1", "nickname": "지훈", "isHost": true },  // 자동 공개면 null
   "answers": [
-    { "participantId": "1", "nickname": "지훈", "text": "촉감으로..." },
-    { "participantId": "2", "nickname": "민수", "text": "물티슈 색을..." }
+    // answerId 는 투표할 때 POST /rounds/:id/votes 의 본문에 넣는 값이다
+    { "participantId": "1", "nickname": "지훈", "text": "촉감으로...", "answerId": "77", "voteCount": null },
+    { "participantId": "2", "nickname": "민수", "text": "물티슈 색을...", "answerId": "78", "voteCount": null }
   ],
-  "notSubmitted": []          // 강제 공개 시 끝내 안 낸 사람들
+  "notSubmitted": [],         // 강제 공개 시 끝내 안 낸 사람들. 이들도 투표는 할 수 있다
+  "myVote": null,             // 내가 투표했으면 { "answerId": "77" }. 한 번 던진 표는 못 바꾼다
+  "votedCount": 1,            // 투표를 마친 사람 수. 누가 했는지는 응답 어디에도 없다
+  "votingClosedAt": null      // 투표가 끝난 시각(ISO 8601). 진행 중이면 null
 }
 \`\`\`
+
+공개 뒤에는 같은 \`revealed\` 응답이 투표 진행에 따라 두 모습을 갖는다.
+
+| | \`answers[].voteCount\` | \`myVote\` | \`votingClosedAt\` |
+| --- | --- | --- | --- |
+| 투표 중 | 전부 \`null\` | 내 표만, 아직 안 냈으면 \`null\` | \`null\` |
+| 투표 끝 | 실제 득표 수 (0 포함) | 내 표, 끝내 안 냈으면 \`null\` | ISO 8601 시각 |
+
+득표 수는 투표가 끝나기 전엔 응답에 실리지 않는다 — 중간 집계가 보이면 앞서는 답에 표가 쏠린다.
+\`votingClosedAt\` 은 모든 참가자가 공유하는 값이므로, 이 시각을 기준점으로 결과 연출 타이밍을 잡으면
+폴링이 도착한 시점이 사람마다 달라도 모두의 화면에서 같은 순간에 득표 수가 열린다
+(\`revealedAt\` 을 카드 공개에 쓰는 것과 같다).
 
 \`\`\`jsonc
 // status = skipped — 스킵은 공개가 아니다. 이미 제출된 답변이 있어도
@@ -243,9 +283,17 @@ export class GameController {
 }
 \`\`\`
 
-라운드가 열려 있는 동안 2초 간격으로 폴링한다. \`status\` 가 \`open\` 이 아니게 되면 폴링을 멈춘다.
-\`revealed\` 면 공개 화면으로 전환해서 \`answers\` 를 보여주고, \`skipped\` 면 이번 질문은 건너뛰었다는
-안내만 보여준다 — **스킵은 공개가 아니므로 응답에 답변 텍스트가 절대 없다.**`,
+**폴링(2초 간격)을 언제까지 하는가.** 라운드가 아직 변할 수 있는 동안만 이 엔드포인트를 본다.
+
+| 지금 상태 | 계속 폴링 | 이유 |
+| --- | --- | --- |
+| \`open\` | 예 | 전원이 제출하면 그 순간 \`revealed\` 로 바뀐다 |
+| \`revealed\` + \`votingClosedAt: null\` | **예** | 투표 단계다. \`votedCount\` 가 오르고, 전원 투표 또는 방장의 강제 종료로 \`votingClosedAt\` 이 채워진다 |
+| \`revealed\` + \`votingClosedAt\` 채워짐 | 아니오 | 이 라운드는 더 바뀌지 않는다. \`GET /rooms/:code\` 폴링으로 옮겨 다음 라운드를 기다린다 |
+| \`skipped\` | 아니오 | 위와 같다 |
+
+\`revealed\` 면 공개 화면으로 전환해서 \`answers\` 를 보여주고 이어서 투표를 받는다. \`skipped\` 면 이번
+질문은 건너뛰었다는 안내만 보여준다 — **스킵은 공개가 아니므로 응답에 답변 텍스트가 절대 없다.**`,
   })
   @ApiExtraModels(RoundOpenResponseDto, RoundRevealedResponseDto, RoundSkippedResponseDto)
   @ApiOkResponse({
@@ -273,9 +321,10 @@ export class GameController {
       // 프로세스 안으로도 끌어오지 않기 위함이다. 필요한 정보는 제출
       // 여부(submittedParticipantIds)와 내 답변(findMyAnswer)뿐이다.
       const participants = await this.rooms.listParticipants(round.roomId);
-      const [submitted, mine] = await Promise.all([
+      const [submitted, mine, lengths] = await Promise.all([
         this.rounds.submittedParticipantIds(round.id),
         this.rounds.findMyAnswer(round.id, me.id),
+        this.rounds.answerLengths(round.id),
       ]);
       return {
         roundId: round.id,
@@ -285,6 +334,7 @@ export class GameController {
           id: p.id,
           nickname: p.nickname,
           submitted: submitted.has(p.id),
+          answerLength: lengths.get(p.id) ?? null,
         })),
         mySubmission: mine ? { text: mine.text } : null,
       };
@@ -307,6 +357,12 @@ export class GameController {
     const answers = await this.rounds.listAnswers(round);
     const byId = new Map(participants.map((p) => [p.id, p]));
     const answeredIds = new Set(answers.map((a) => a.participantId));
+    const [myVote, votedCount, voteCounts] = await Promise.all([
+      this.votes.myVote(round.id, me.id),
+      this.votes.votedCount(round.id),
+      this.votes.countByAnswer(round.id),
+    ]);
+    const votingClosed = round.votingClosedAt !== null;
 
     return {
       roundId: round.id,
@@ -320,10 +376,16 @@ export class GameController {
         participantId: a.participantId,
         nickname: byId.get(a.participantId)?.nickname ?? '(알 수 없음)',
         text: a.text,
+        answerId: a.id,
+        // 투표 중에는 집계를 내보내지 않는다. 보이면 앞서는 답에 표가 쏠린다.
+        voteCount: votingClosed ? (voteCounts.get(a.id) ?? 0) : null,
       })),
       notSubmitted: participants
         .filter((p) => !answeredIds.has(p.id))
         .map((p) => this.toParticipantDto(p, room.hostParticipantId)),
+      myVote: myVote ? { answerId: myVote.answerId } : null,
+      votedCount,
+      votingClosedAt: round.votingClosedAt ? round.votingClosedAt.toISOString() : null,
     };
   }
 
@@ -424,6 +486,71 @@ export class GameController {
 
     const skipped = await this.rounds.skip(round);
     return { roundId: skipped.id, status: 'skipped' };
+  }
+
+  @Post('rounds/:id/votes')
+  @UseGuards(ParticipantGuard)
+  @ApiSecurity('participantToken')
+  @ApiOperation({
+    summary: '투표',
+    description: `공개된 답변 중 하나에 투표한다. **1인 1표이고 수정할 수 없다.** 자기 답변에도 투표할 수 있다.
+
+\`\`\`jsonc
+// 요청
+{ "answerId": "77" }
+
+// 응답 201
+{
+  "voted": true,
+  "allVoted": false      // true 면 이 표로 투표가 끝나 득표 수가 공개됐다
+}
+\`\`\`
+
+투표 중에는 \`GET /rounds/:id\` 의 \`answers[].voteCount\` 가 모두 \`null\` 이다. 투표가 끝나야 실제 수가 들어온다.
+
+| 상태 | 이유 |
+| --- | --- |
+| 403 | 이 방 참가자가 아님 |
+| 404 | 이 라운드에 없는 answerId |
+| 409 | 아직 공개되지 않음 / 이미 투표함 / 투표가 이미 끝남 |`,
+  })
+  @ApiCreatedResponse({ type: CastVoteResponseDto })
+  async castVote(
+    @Param('id') id: string,
+    @Body() dto: CastVoteDto,
+    @CurrentParticipant() me: Participant,
+  ): Promise<CastVoteResponseDto> {
+    const round = await this.rounds.findById(id);
+    const result = await this.votes.cast(round, me, dto.answerId);
+    return { voted: result.voted, allVoted: result.allVoted };
+  }
+
+  @Post('rounds/:id/votes/close')
+  @UseGuards(ParticipantGuard)
+  @ApiSecurity('participantToken')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: '투표 강제 종료',
+    description: `아직 투표하지 않은 사람이 있어도 투표를 닫고 득표 수를 공개한다. **방장만 호출할 수 있다.**
+
+응답은 갱신된 라운드 상태이며, \`votingClosedAt\` 이 채워지고 \`answers[].voteCount\` 에 실제 수가 들어온다.
+
+| 상태 | 이유 |
+| --- | --- |
+| 403 | 방장이 아님 |
+| 409 | 아직 공개되지 않음 / 투표가 이미 끝남 |`,
+  })
+  @ApiOkResponse({ type: RoundRevealedResponseDto })
+  async closeVoting(
+    @Param('id') id: string,
+    @CurrentParticipant() me: Participant,
+  ): Promise<RoundRevealedResponseDto> {
+    const round = await this.rounds.findById(id);
+    const room = await this.roomOf(round.roomId);
+    this.rooms.assertMember(room, me);
+    this.rooms.assertHost(room, me);
+    await this.votes.close(round);
+    return (await this.getRound(id, me)) as RoundRevealedResponseDto;
   }
 
   private async roomOf(roomId: string) {

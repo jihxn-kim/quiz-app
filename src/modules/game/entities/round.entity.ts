@@ -28,6 +28,11 @@ export class Round {
   @Column({ name: 'revealed_by', type: 'bigint', nullable: true })
   revealedBy!: string | null;
 
+  // 전원이 투표한 순간(또는 방장이 강제 종료한 순간). 결과 공개 연출의
+  // 기준점이다 — revealedAt 과 같은 역할을 투표 결과에 대해 한다.
+  @Column({ name: 'voting_closed_at', type: 'timestamptz', nullable: true })
+  votingClosedAt!: Date | null;
+
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;
 }

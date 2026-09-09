@@ -222,6 +222,20 @@ export class RoundService {
   }
 
   /**
+   * 참가자별 답변 길이. 공개 전 화면의 블러 블록을 그리는 데 쓴다.
+   *
+   * 텍스트가 아니라 길이만 내보내는 것이 요점이다. CSS 로 가린 진짜 텍스트는
+   * 개발자도구로 읽히므로, 클라이언트에 도달하지 않게 하는 것이 유일한 방어다.
+   */
+  async answerLengths(roundId: string): Promise<Map<string, number>> {
+    const rows = await this.answers.find({
+      where: { roundId },
+      select: { participantId: true, text: true },
+    });
+    return new Map(rows.map((row) => [row.participantId, row.text.length]));
+  }
+
+  /**
    * 통계는 부가 기능이다. 실패해도 게임 흐름을 막지 않는다 —
    * 사람들이 하던 게임이 통계 때문에 멈추면 안 된다.
    */

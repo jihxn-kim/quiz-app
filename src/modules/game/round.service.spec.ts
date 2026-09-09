@@ -476,4 +476,23 @@ describe('RoundService', () => {
       expect(ids.size).toBe(0);
     });
   });
+
+  describe('answerLengths', () => {
+    it('참가자별 답변 길이를 돌려준다', async () => {
+      answerRepo.find.mockResolvedValue([
+        { participantId: '1', text: '짧음' },
+        { participantId: '2', text: '조금 더 긴 답변입니다' },
+      ]);
+
+      const lengths = await service.answerLengths('10');
+
+      expect(lengths.get('1')).toBe(2);
+      expect(lengths.get('2')).toBe(12);
+    });
+
+    it('아무도 안 냈으면 빈 맵', async () => {
+      answerRepo.find.mockResolvedValue([]);
+      expect((await service.answerLengths('10')).size).toBe(0);
+    });
+  });
 });

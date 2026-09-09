@@ -1,6 +1,7 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { ParticipantDto, ParticipantSubmissionDto } from './participant.dto';
 import { QuestionDto } from './question.dto';
+import { MyVoteDto } from './vote.dto';
 
 export class MySubmissionDto {
   @ApiProperty({ description: '내가 제출한 답변', example: '촉감으로 확인할 것 같아' })
@@ -41,6 +42,18 @@ export class RevealedAnswerDto {
 
   @ApiProperty({ description: '답변 본문', example: '물티슈 색을 손으로...' })
   text!: string;
+
+  @ApiProperty({ description: '이 답변의 id. 투표할 때 이 값을 보낸다', example: '77' })
+  answerId!: string;
+
+  @ApiProperty({
+    description:
+      '득표 수. 투표가 끝나기 전에는 null 이다 — 실시간 집계가 보이면 ' +
+      '앞서는 답에 표가 쏠린다',
+    example: 2,
+    nullable: true,
+  })
+  voteCount!: number | null;
 }
 
 /**
@@ -74,6 +87,25 @@ export class RoundRevealedResponseDto {
 
   @ApiProperty({ description: '끝내 제출하지 않은 참가자. 강제 공개 시에만 채워진다', type: [ParticipantDto] })
   notSubmitted!: ParticipantDto[];
+
+  @ApiProperty({
+    description: '내가 투표한 답변. 아직 안 했으면 null',
+    type: MyVoteDto,
+    nullable: true,
+  })
+  myVote!: MyVoteDto | null;
+
+  @ApiProperty({ description: '투표를 마친 사람 수. 누가 했는지는 포함되지 않는다', example: 2 })
+  votedCount!: number;
+
+  @ApiProperty({
+    description:
+      '투표가 끝난 시각 (ISO 8601). 아직 진행 중이면 null. ' +
+      '모든 클라이언트가 이 시각을 기준으로 결과 연출 타이밍을 계산한다',
+    example: '2026-09-09T12:35:10.000Z',
+    nullable: true,
+  })
+  votingClosedAt!: string | null;
 }
 
 export class StartRoundResponseDto {
