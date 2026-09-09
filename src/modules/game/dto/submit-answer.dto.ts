@@ -5,8 +5,8 @@ import { IsString, Length } from 'class-validator';
 export class SubmitAnswerDto {
   @ApiProperty({ description: '내 답변. 제출 후 수정 불가', example: '촉감으로 확인할 것 같아', minLength: 1, maxLength: 500 })
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
-  @IsString()
-  @Length(1, 500)
+  @IsString({ message: '답변은 텍스트여야 합니다' })
+  @Length(1, 500, { message: '답변은 1~500자여야 합니다' })
   text!: string;
 }
 

@@ -5,8 +5,8 @@ import { IsString, Length } from 'class-validator';
 export class JoinRoomDto {
   @ApiProperty({ description: '내가 쓸 닉네임. 같은 방에 중복 불가', example: '민수', minLength: 1, maxLength: 20 })
   @Transform(({ value }) => (typeof value === 'string' ? value.trim() : value))
-  @IsString()
-  @Length(1, 20)
+  @IsString({ message: '닉네임은 텍스트여야 합니다' })
+  @Length(1, 20, { message: '닉네임은 1~20자여야 합니다' })
   nickname!: string;
 }
 
