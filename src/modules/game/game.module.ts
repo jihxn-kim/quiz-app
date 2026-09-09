@@ -4,6 +4,7 @@ import { Answer } from './entities/answer.entity';
 import { Participant } from './entities/participant.entity';
 import { Room } from './entities/room.entity';
 import { Round } from './entities/round.entity';
+import { Vote } from './entities/vote.entity';
 import { ParticipantGuard } from './auth/participant.guard';
 import { RoomService } from './room.service';
 import { QuestionsModule } from 'src/modules/questions/questions.module';
@@ -12,7 +13,7 @@ import { GameController } from './game.controller';
 import { QuestionPoolService } from './question-pool.service';
 import { RoundService } from './round.service';
 
-const ENTITIES = [Room, Participant, Round, Answer];
+const ENTITIES = [Room, Participant, Round, Answer, Vote];
 
 @Module({
   imports: [TypeOrmModule.forFeature(ENTITIES), QuestionsModule, StatsModule],
