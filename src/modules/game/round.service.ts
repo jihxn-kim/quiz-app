@@ -153,11 +153,11 @@ export class RoundService {
 
     // 트랜잭션 커밋 후에 통계를 기록한다. 트랜잭션 안에서 부르면 listAnswers 가
     // 다른 커넥션으로 읽어 방금 커밋되지 않은 마지막 답변을 못 보고, 행 잠금도
-    // 통계 기록 동안 계속 잡고 있게 된다. await 하지 않는다 — OpenAI 임베딩
-    // 호출은 재시도까지 포함하면 수 초~수 분이 걸릴 수 있는데, 그동안 마지막
-    // 제출자의 응답만 붙잡아두면 다른 사람들은 폴링으로 이미 공개를 보고
-    // 있는 와중에 정작 그 사람 화면만 멈춘다. recordQuietly 가 예외는 이미
-    // 삼키므로 지연도 격리한다. 테스트는 lastStatsWrite 로 완료를 기다린다.
+    // 통계 기록 동안 계속 잡고 있게 된다. await 하지 않는다 — 통계 기록이
+    // 지연되더라도, 그동안 마지막 제출자의 응답만 붙잡아두면 다른 사람들은
+    // 폴링으로 이미 공개를 보고 있는 와중에 정작 그 사람 화면만 멈춘다.
+    // recordQuietly 가 예외는 이미 삼키므로 지연도 격리한다. 테스트는
+    // lastStatsWrite 로 완료를 기다린다.
     if (result.allSubmitted) {
       this.lastStatsWrite = this.recordRevealed(round.id);
     }
@@ -176,7 +176,7 @@ export class RoundService {
     }
     const revealed = await this.findById(round.id);
     // submit() 과 같은 이유로 기다리지 않는다 — 강제 공개를 누른 방장이
-    // OpenAI 호출이 끝날 때까지 멈춰 있을 이유가 없다.
+    // 통계 기록이 끝날 때까지 멈춰 있을 이유가 없다.
     this.lastStatsWrite = this.recordRevealed(revealed.id);
     return revealed;
   }
@@ -237,10 +237,11 @@ export class RoundService {
     await this.recordQuietly(async () => {
       const round = await this.findById(roundId);
       const answers = await this.listAnswers(round);
-      // 답변이 2개 미만이면 분산도를 잴 수 없다. 0 으로 기록하면
-      // "의견이 안 갈렸다" 로 읽혀 그 질문이 부당하게 은퇴 후보가 된다.
+      // 답변이 2개 미만이면(방장 혼자 낸 라운드) 정상 완주로 세지 않는다.
+      // 그대로 completed 를 올리면 참가자 수와 무관하게 "완주"로 잡혀
+      // 완주율(completed/served) 이 왜곡된다.
       if (answers.length < 2) return;
-      await this.stats.recordAnswers(round.questionId, answers.map((a) => a.text));
+      await this.stats.recordCompleted(round.questionId, answers.map((a) => a.text));
     }, 'answers');
   }
 }

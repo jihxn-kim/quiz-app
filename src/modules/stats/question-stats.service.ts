@@ -1,8 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, MoreThanOrEqual, Repository } from 'typeorm';
-import { meanPairwiseDistance } from 'src/common/utils/cosine';
-import { EmbeddingClient } from 'src/infrastructure/llm/embedding.client';
 import { Question } from 'src/modules/questions/entities/question.entity';
 import { QuestionStat } from 'src/modules/questions/entities/question-stat.entity';
 import { QuestionStatus } from 'src/modules/questions/enums/question-status.enum';
@@ -12,7 +10,6 @@ export const MAX_SKIP_RATE_FOR_GOLDEN = 0.1;
 export const MIN_COMPLETION_RATE_FOR_GOLDEN = 0.7;
 export const RETIRE_SKIP_RATE = 0.3;
 export const GOLDEN_TOP_RATIO = 0.2;
-export const RETIRE_BOTTOM_RATIO = 0.1;
 /** 은퇴 후에도 서빙 가능한 live 질문이 이 아래로 떨어지면 은퇴를 보류한다. */
 export const MIN_LIVE_POOL = 50;
 /** 골든으로 승격 가능한 상태. rejected/retired 는 승격 대상이 아니다. */
@@ -23,7 +20,6 @@ export class QuestionStatsService {
   private readonly logger = new Logger(QuestionStatsService.name);
 
   constructor(
-    private readonly embeddings: EmbeddingClient,
     @InjectRepository(QuestionStat)
     private readonly stats: Repository<QuestionStat>,
     @InjectRepository(Question)
@@ -45,21 +41,16 @@ export class QuestionStatsService {
   }
 
   /** 한 방이 전원 답변으로 끝났을 때 호출한다. */
-  async recordAnswers(questionId: string, answers: string[]): Promise<void> {
+  async recordCompleted(questionId: string, answers: string[]): Promise<void> {
     if (answers.length === 0) return;
 
-    const vectors = await this.embeddings.embed(answers);
     const stat = await this.loadOrCreate(questionId);
 
     // 누적 평균으로 갱신한다. 덮어쓰면 MIN_SERVED 표본 가드가 무의미해진다 —
-    // 200번 서빙된 질문이 마지막 한 방의 분산만으로 승격/은퇴될 수 있다.
+    // 200번 서빙된 질문이 마지막 한 방의 평균 길이만으로 승격/은퇴 판단에
+    // 영향을 줄 수 있다.
     const previousCompleted = stat.completed;
     stat.completed += 1;
-
-    const roomVariance = meanPairwiseDistance(vectors);
-    stat.answerVariance =
-      ((stat.answerVariance ?? 0) * previousCompleted + roomVariance) /
-      stat.completed;
 
     const roomAvgLen =
       answers.reduce((sum, answer) => sum + answer.length, 0) / answers.length;
@@ -74,18 +65,18 @@ export class QuestionStatsService {
     const rows = await this.stats.find({
       where: { served: MoreThanOrEqual(MIN_SERVED) },
     });
-    const cutoff = this.varianceCutoff(rows, GOLDEN_TOP_RATIO, 'top');
+    const completionRates = rows.map((row) => row.completed / row.served);
+    const cutoff = this.topCompletionRateCutoff(completionRates, GOLDEN_TOP_RATIO);
 
     const ids = rows
       .filter((row) => {
         // 쿼리에도 조건이 있지만 여기서 한 번 더 막는다. 승격 기준은
         // 최소 서빙 횟수를 넘긴 질문에만 적용되어야 한다.
         if (row.served < MIN_SERVED) return false;
-        const variance = row.answerVariance ?? 0;
         const skipRate = row.skipped / row.served;
         const completionRate = row.completed / row.served;
         return (
-          variance >= cutoff &&
+          completionRate >= cutoff &&
           skipRate < MAX_SKIP_RATE_FOR_GOLDEN &&
           completionRate > MIN_COMPLETION_RATE_FOR_GOLDEN
         );
@@ -111,22 +102,20 @@ export class QuestionStatsService {
     const rows = await this.stats.find({
       where: { served: MoreThanOrEqual(MIN_SERVED) },
     });
-    const cutoff = this.varianceCutoff(rows, RETIRE_BOTTOM_RATIO, 'bottom');
 
     const ids = rows
       .filter((row) => {
         if (row.served < MIN_SERVED) return false;
-        const variance = row.answerVariance ?? 0;
         const skipRate = row.skipped / row.served;
-        return variance <= cutoff || skipRate > RETIRE_SKIP_RATE;
+        return skipRate > RETIRE_SKIP_RATE;
       })
       .map((row) => row.questionId);
 
     if (ids.length === 0) return 0;
 
     // 은퇴 후 남는 live 풀이 최소 보유량 아래로 떨어지면 아무것도 은퇴시키지
-    // 않는다. 컷오프가 상대적이라 후보가 있으면 항상 뭔가 은퇴시키게 되는데,
-    // 그러다 살아있는 질문이 세 개 남아도 계속 깎일 수 있다.
+    // 않는다. 스킵률 기준을 넘는 질문이 한꺼번에 몰리는 시기에는 이 가드가
+    // 없으면 살아있는 질문이 몇 개 남지 않을 때까지 계속 깎일 수 있다.
     const liveCount = await this.questions.count({
       where: { status: QuestionStatus.LIVE },
     });
@@ -151,17 +140,11 @@ export class QuestionStatsService {
     );
   }
 
-  /** 분산도 기준 상위/하위 컷오프 값 */
-  private varianceCutoff(
-    rows: QuestionStat[],
-    ratio: number,
-    end: 'top' | 'bottom',
-  ): number {
-    if (rows.length === 0) return end === 'top' ? Infinity : -Infinity;
-    const sorted = rows
-      .map((row) => row.answerVariance ?? 0)
-      .sort((a, b) => b - a);
+  /** 완주율(completed/served) 기준 상위 컷오프 값 */
+  private topCompletionRateCutoff(rates: number[], ratio: number): number {
+    if (rates.length === 0) return Infinity;
+    const sorted = [...rates].sort((a, b) => b - a);
     const index = Math.max(0, Math.ceil(sorted.length * ratio) - 1);
-    return end === 'top' ? sorted[index] : sorted[sorted.length - 1 - index];
+    return sorted[index];
   }
 }
