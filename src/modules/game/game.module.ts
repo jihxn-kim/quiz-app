@@ -12,13 +12,21 @@ import { StatsModule } from 'src/modules/stats/stats.module';
 import { GameController } from './game.controller';
 import { QuestionPoolService } from './question-pool.service';
 import { RoundService } from './round.service';
+import { VoteService } from './vote.service';
 
 const ENTITIES = [Room, Participant, Round, Answer, Vote];
 
 @Module({
   imports: [TypeOrmModule.forFeature(ENTITIES), QuestionsModule, StatsModule],
   controllers: [GameController],
-  providers: [ParticipantGuard, RoomService, QuestionPoolService, RoundService],
-  exports: [TypeOrmModule, ParticipantGuard, RoomService, QuestionPoolService, RoundService],
+  providers: [ParticipantGuard, RoomService, QuestionPoolService, RoundService, VoteService],
+  exports: [
+    TypeOrmModule,
+    ParticipantGuard,
+    RoomService,
+    QuestionPoolService,
+    RoundService,
+    VoteService,
+  ],
 })
 export class GameModule {}
