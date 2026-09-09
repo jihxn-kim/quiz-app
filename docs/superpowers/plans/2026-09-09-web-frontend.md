@@ -1876,7 +1876,7 @@ Railway 환경변수에 Vercel 도메인을 넣는다:
 ```bash
 TOKEN_FILE="$(jq -r '.projects["quiz-app"].envs.prod.credentials.RAILWAY_TOKEN' ~/.claude/project-accounts.json | sed 's|^@file:||; s|^~|'"$HOME"'|')"
 SERVICE="$(jq -r '.projects["quiz-app"].envs.prod.services.backend.service' ~/.claude/project-accounts.json)"
-RAILWAY_TOKEN="$(cat "$TOKEN_FILE")" railway variables --service "$SERVICE" --set "CORS_ORIGINS=https://<vercel-도메인>"
+RAILWAY_TOKEN="$(cat "$TOKEN_FILE")" railway variables set --service "$SERVICE" "CORS_ORIGINS=https://<vercel-도메인>"
 ```
 
 설정 후 재배포가 필요하면 재배포한다.
