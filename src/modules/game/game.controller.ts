@@ -34,10 +34,12 @@ import {
   StartRoundResponseDto,
 } from './dto/round.dto';
 import { SubmitAnswerDto, SubmitAnswerResponseDto } from './dto/submit-answer.dto';
+import { CastVoteDto, CastVoteResponseDto } from './dto/vote.dto';
 import { Participant } from './entities/participant.entity';
 import { RoundStatus } from './enums/round-status.enum';
 import { RoomService } from './room.service';
 import { RoundService } from './round.service';
+import { VoteService } from './vote.service';
 
 @ApiTags('game')
 @Controller()
@@ -45,6 +47,7 @@ export class GameController {
   constructor(
     private readonly rooms: RoomService,
     private readonly rounds: RoundService,
+    private readonly votes: VoteService,
     @InjectRepository(Question) private readonly questions: Repository<Question>,
   ) {}
 
@@ -273,9 +276,10 @@ export class GameController {
       // 프로세스 안으로도 끌어오지 않기 위함이다. 필요한 정보는 제출
       // 여부(submittedParticipantIds)와 내 답변(findMyAnswer)뿐이다.
       const participants = await this.rooms.listParticipants(round.roomId);
-      const [submitted, mine] = await Promise.all([
+      const [submitted, mine, lengths] = await Promise.all([
         this.rounds.submittedParticipantIds(round.id),
         this.rounds.findMyAnswer(round.id, me.id),
+        this.rounds.answerLengths(round.id),
       ]);
       return {
         roundId: round.id,
@@ -285,6 +289,7 @@ export class GameController {
           id: p.id,
           nickname: p.nickname,
           submitted: submitted.has(p.id),
+          answerLength: lengths.get(p.id) ?? null,
         })),
         mySubmission: mine ? { text: mine.text } : null,
       };
@@ -307,6 +312,12 @@ export class GameController {
     const answers = await this.rounds.listAnswers(round);
     const byId = new Map(participants.map((p) => [p.id, p]));
     const answeredIds = new Set(answers.map((a) => a.participantId));
+    const [myVote, votedCount, voteCounts] = await Promise.all([
+      this.votes.myVote(round.id, me.id),
+      this.votes.votedCount(round.id),
+      this.votes.countByAnswer(round.id),
+    ]);
+    const votingClosed = round.votingClosedAt !== null;
 
     return {
       roundId: round.id,
@@ -320,10 +331,16 @@ export class GameController {
         participantId: a.participantId,
         nickname: byId.get(a.participantId)?.nickname ?? '(알 수 없음)',
         text: a.text,
+        answerId: a.id,
+        // 투표 중에는 집계를 내보내지 않는다. 보이면 앞서는 답에 표가 쏠린다.
+        voteCount: votingClosed ? (voteCounts.get(a.id) ?? 0) : null,
       })),
       notSubmitted: participants
         .filter((p) => !answeredIds.has(p.id))
         .map((p) => this.toParticipantDto(p, room.hostParticipantId)),
+      myVote: myVote ? { answerId: myVote.answerId } : null,
+      votedCount,
+      votingClosedAt: round.votingClosedAt ? round.votingClosedAt.toISOString() : null,
     };
   }
 
@@ -424,6 +441,71 @@ export class GameController {
 
     const skipped = await this.rounds.skip(round);
     return { roundId: skipped.id, status: 'skipped' };
+  }
+
+  @Post('rounds/:id/votes')
+  @UseGuards(ParticipantGuard)
+  @ApiSecurity('participantToken')
+  @ApiOperation({
+    summary: '투표',
+    description: `공개된 답변 중 하나에 투표한다. **1인 1표이고 수정할 수 없다.** 자기 답변에도 투표할 수 있다.
+
+\`\`\`jsonc
+// 요청
+{ "answerId": "77" }
+
+// 응답 201
+{
+  "voted": true,
+  "allVoted": false      // true 면 이 표로 투표가 끝나 득표 수가 공개됐다
+}
+\`\`\`
+
+투표 중에는 \`GET /rounds/:id\` 의 \`answers[].voteCount\` 가 모두 \`null\` 이다. 투표가 끝나야 실제 수가 들어온다.
+
+| 상태 | 이유 |
+| --- | --- |
+| 403 | 이 방 참가자가 아님 |
+| 404 | 이 라운드에 없는 answerId |
+| 409 | 아직 공개되지 않음 / 이미 투표함 / 투표가 이미 끝남 |`,
+  })
+  @ApiCreatedResponse({ type: CastVoteResponseDto })
+  async castVote(
+    @Param('id') id: string,
+    @Body() dto: CastVoteDto,
+    @CurrentParticipant() me: Participant,
+  ): Promise<CastVoteResponseDto> {
+    const round = await this.rounds.findById(id);
+    const result = await this.votes.cast(round, me, dto.answerId);
+    return { voted: result.voted, allVoted: result.allVoted };
+  }
+
+  @Post('rounds/:id/votes/close')
+  @UseGuards(ParticipantGuard)
+  @ApiSecurity('participantToken')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: '투표 강제 종료',
+    description: `아직 투표하지 않은 사람이 있어도 투표를 닫고 득표 수를 공개한다. **방장만 호출할 수 있다.**
+
+응답은 갱신된 라운드 상태이며, \`votingClosedAt\` 이 채워지고 \`answers[].voteCount\` 에 실제 수가 들어온다.
+
+| 상태 | 이유 |
+| --- | --- |
+| 403 | 방장이 아님 |
+| 409 | 투표가 이미 끝남 |`,
+  })
+  @ApiOkResponse({ type: RoundRevealedResponseDto })
+  async closeVoting(
+    @Param('id') id: string,
+    @CurrentParticipant() me: Participant,
+  ): Promise<RoundRevealedResponseDto> {
+    const round = await this.rounds.findById(id);
+    const room = await this.roomOf(round.roomId);
+    this.rooms.assertMember(room, me);
+    this.rooms.assertHost(room, me);
+    await this.votes.close(round);
+    return (await this.getRound(id, me)) as RoundRevealedResponseDto;
   }
 
   private async roomOf(roomId: string) {

@@ -3,6 +3,7 @@ import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Question } from 'src/modules/questions/entities/question.entity';
 import { ParticipantGuard } from './auth/participant.guard';
+import { RoundOpenResponseDto, RoundRevealedResponseDto } from './dto/round.dto';
 import { Participant } from './entities/participant.entity';
 import { Room } from './entities/room.entity';
 import { Round } from './entities/round.entity';
@@ -10,6 +11,7 @@ import { RoundStatus } from './enums/round-status.enum';
 import { GameController } from './game.controller';
 import { RoomService } from './room.service';
 import { RoundService } from './round.service';
+import { VoteService } from './vote.service';
 
 describe('GameController', () => {
   let controller: GameController;
@@ -32,6 +34,14 @@ describe('GameController', () => {
     listAnswers: jest.fn(),
     findMyAnswer: jest.fn(),
     submittedParticipantIds: jest.fn(),
+    answerLengths: jest.fn(),
+  };
+  const votes = {
+    cast: jest.fn(),
+    close: jest.fn(),
+    myVote: jest.fn(),
+    countByAnswer: jest.fn(),
+    votedCount: jest.fn(),
   };
   const questions = { findOne: jest.fn() };
 
@@ -45,6 +55,7 @@ describe('GameController', () => {
       providers: [
         { provide: RoomService, useValue: rooms },
         { provide: RoundService, useValue: rounds },
+        { provide: VoteService, useValue: votes },
         { provide: getRepositoryToken(Question), useValue: questions },
       ],
     })
@@ -68,6 +79,7 @@ describe('GameController', () => {
     ]);
     rounds.submittedParticipantIds.mockResolvedValue(new Set(['1', '2']));
     rounds.findMyAnswer.mockResolvedValue({ participantId: '1', text: '내 답변' });
+    rounds.answerLengths.mockResolvedValue(new Map([['1', 3], ['2', 6]]));
     // 공개 전 브랜치는 listAnswers 를 아예 호출하지 않는다. 만약 회귀로
     // 다시 호출하게 되면 이 스텁이 남의 답변을 흘려서 아래 assertion 이 잡아낸다.
     rounds.listAnswers.mockResolvedValue([
@@ -88,6 +100,7 @@ describe('GameController', () => {
     const round = {
       id: '11', roomId: '1', questionId: '42',
       status: RoundStatus.REVEALED, revealedAt: new Date(), revealedBy: null,
+      votingClosedAt: null,
     } as Round;
     rounds.findById.mockResolvedValue(round);
     rooms.findById.mockResolvedValue({ id: '1', hostParticipantId: '1' } as Room);
@@ -96,10 +109,13 @@ describe('GameController', () => {
       { id: '2', nickname: '민수' },
     ]);
     rounds.listAnswers.mockResolvedValue([
-      { participantId: '1', text: '내 답변' },
-      { participantId: '2', text: '남의 답변' },
+      { id: '77', participantId: '1', text: '내 답변' },
+      { id: '88', participantId: '2', text: '남의 답변' },
     ]);
     questions.findOne.mockResolvedValue({ id: '42', text: '질문?' });
+    votes.myVote.mockResolvedValue(null);
+    votes.votedCount.mockResolvedValue(0);
+    votes.countByAnswer.mockResolvedValue(new Map());
 
     const result = await controller.getRound('11', { id: '1', roomId: '1' } as Participant);
 
@@ -168,11 +184,92 @@ describe('GameController', () => {
     ]);
     rounds.submittedParticipantIds.mockResolvedValue(new Set(['1']));
     rounds.findMyAnswer.mockResolvedValue(null);
+    rounds.answerLengths.mockResolvedValue(new Map());
     questions.findOne.mockResolvedValue({ id: '42', text: '질문?' });
 
     const result = await controller.getRound('11', { id: '2', roomId: '1' } as Participant);
 
     expect((result as { mySubmission: unknown }).mySubmission).toBeNull();
+  });
+
+  it('투표 전에는 득표 수를 보내지 않는다', async () => {
+    const round = {
+      id: '11', roomId: '1', questionId: '42', status: RoundStatus.REVEALED,
+      revealedAt: new Date(), revealedBy: null, votingClosedAt: null,
+    } as Round;
+    rounds.findById.mockResolvedValue(round);
+    rooms.findById.mockResolvedValue({ id: '1', hostParticipantId: '1' } as Room);
+    rooms.listParticipants.mockResolvedValue([
+      { id: '1', nickname: '지훈' }, { id: '2', nickname: '민수' },
+    ]);
+    rounds.listAnswers.mockResolvedValue([
+      { id: '77', participantId: '1', text: '내 답' },
+      { id: '88', participantId: '2', text: '남의 답' },
+    ]);
+    questions.findOne.mockResolvedValue({ id: '42', text: '질문?' });
+    votes.myVote.mockResolvedValue(null);
+    votes.votedCount.mockResolvedValue(1);
+    votes.countByAnswer.mockResolvedValue(new Map([['77', 1]]));
+
+    const result = await controller.getRound('11', { id: '1', roomId: '1' } as Participant);
+
+    const revealed = result as RoundRevealedResponseDto;
+    expect(revealed.answers.every((a) => a.voteCount === null)).toBe(true);
+    expect(revealed.votedCount).toBe(1);
+    expect(revealed.votingClosedAt).toBeNull();
+  });
+
+  it('투표가 끝나면 득표 수가 실린다', async () => {
+    const closedAt = new Date();
+    const round = {
+      id: '11', roomId: '1', questionId: '42', status: RoundStatus.REVEALED,
+      revealedAt: new Date(), revealedBy: null, votingClosedAt: closedAt,
+    } as Round;
+    rounds.findById.mockResolvedValue(round);
+    rooms.findById.mockResolvedValue({ id: '1', hostParticipantId: '1' } as Room);
+    rooms.listParticipants.mockResolvedValue([
+      { id: '1', nickname: '지훈' }, { id: '2', nickname: '민수' },
+    ]);
+    rounds.listAnswers.mockResolvedValue([
+      { id: '77', participantId: '1', text: '내 답' },
+      { id: '88', participantId: '2', text: '남의 답' },
+    ]);
+    questions.findOne.mockResolvedValue({ id: '42', text: '질문?' });
+    votes.myVote.mockResolvedValue({ answerId: '88' });
+    votes.votedCount.mockResolvedValue(2);
+    votes.countByAnswer.mockResolvedValue(new Map([['88', 2]]));
+
+    const revealed = (await controller.getRound(
+      '11', { id: '1', roomId: '1' } as Participant,
+    )) as RoundRevealedResponseDto;
+
+    expect(revealed.answers.find((a) => a.answerId === '88')?.voteCount).toBe(2);
+    expect(revealed.answers.find((a) => a.answerId === '77')?.voteCount).toBe(0);
+    expect(revealed.myVote).toEqual({ answerId: '88' });
+    expect(revealed.votingClosedAt).toBe(closedAt.toISOString());
+  });
+
+  it('공개 전 응답에 답변 길이는 있고 텍스트는 없다', async () => {
+    const round = {
+      id: '11', roomId: '1', questionId: '42', status: RoundStatus.OPEN,
+    } as Round;
+    rounds.findById.mockResolvedValue(round);
+    rooms.findById.mockResolvedValue({ id: '1', hostParticipantId: '1' } as Room);
+    rooms.listParticipants.mockResolvedValue([
+      { id: '1', nickname: '지훈' }, { id: '2', nickname: '민수' },
+    ]);
+    rounds.submittedParticipantIds.mockResolvedValue(new Set(['2']));
+    rounds.findMyAnswer.mockResolvedValue(null);
+    rounds.answerLengths.mockResolvedValue(new Map([['2', 9]]));
+    questions.findOne.mockResolvedValue({ id: '42', text: '질문?' });
+
+    const result = await controller.getRound('11', { id: '1', roomId: '1' } as Participant);
+
+    const serialized = JSON.stringify(result);
+    expect(serialized).not.toContain('남의 답');
+    const open = result as RoundOpenResponseDto;
+    expect(open.participants.find((p) => p.id === '2')?.answerLength).toBe(9);
+    expect(open.participants.find((p) => p.id === '1')?.answerLength).toBeNull();
   });
 
   it('startRound: 방장이 아니면 거부되고 라운드를 시작하지 않는다', async () => {
