@@ -1,7 +1,7 @@
 import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, IsNull } from 'typeorm';
 import { Answer } from './entities/answer.entity';
 import { Participant } from './entities/participant.entity';
 import { Round } from './entities/round.entity';
@@ -151,6 +151,23 @@ describe('VoteService', () => {
       const closed = await service.close(revealedRound());
 
       expect(closed.votingClosedAt).not.toBeNull();
+    });
+
+    it('UPDATE 조건에 status 와 votingClosedAt 이 둘 다 들어간다', async () => {
+      roundRepo.update.mockResolvedValue({ affected: 1 });
+      roundRepo.findOne.mockResolvedValue(revealedRound({ votingClosedAt: new Date() }));
+
+      await service.close(revealedRound());
+
+      // 앞의 status 검사는 잠금 밖에서 읽은 객체를 보므로 낡을 수 있다.
+      // 실제 쓰기가 조건부여야 그 사이에 바뀐 라운드를 덮어쓰지 않는다.
+      expect(roundRepo.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          status: RoundStatus.REVEALED,
+          votingClosedAt: IsNull(),
+        }),
+        expect.anything(),
+      );
     });
   });
 
