@@ -119,6 +119,23 @@ describe('게임 전체 흐름 (실제 DB)', () => {
     expect(started.body.question.text).toBeTruthy();
   });
 
+  it('폴링 엔드포인트 응답에 Cache-Control: no-store 가 걸린다', async () => {
+    // 프론트는 웹소켓 없이 이 두 엔드포인트를 2초 간격으로 폴링한다. 브라우저가
+    // 응답을 캐시해 버리면 백엔드가 죽어도 캐시된 200 이 재생돼 플레이어 화면이
+    // 조용히 멈춘다 — 모든 응답에 no-store 가 걸려 있어야 한다.
+    const room = await request(app.getHttpServer())
+      .get(`/rooms/${code}`)
+      .set('X-Participant-Token', hostToken)
+      .expect(200);
+    expect(room.headers['cache-control']).toBe('no-store');
+
+    const round = await request(app.getHttpServer())
+      .get(`/rounds/${roundId}`)
+      .set('X-Participant-Token', hostToken)
+      .expect(200);
+    expect(round.headers['cache-control']).toBe('no-store');
+  });
+
   it('공개 전에는 남의 답변이 응답에 없다', async () => {
     await request(app.getHttpServer())
       .post(`/rounds/${roundId}/answers`)
