@@ -11,7 +11,6 @@ import { Participant } from './entities/participant.entity';
 import { Round } from './entities/round.entity';
 import { Vote } from './entities/vote.entity';
 import { RoundStatus } from './enums/round-status.enum';
-import { RoomService } from './room.service';
 
 const POSTGRES_UNIQUE_VIOLATION = '23505';
 
@@ -26,7 +25,6 @@ export class VoteService {
     @InjectRepository(Vote) private readonly votes: Repository<Vote>,
     @InjectRepository(Round) private readonly rounds: Repository<Round>,
     private readonly dataSource: DataSource,
-    private readonly rooms: RoomService,
   ) {}
 
   /**
@@ -91,12 +89,16 @@ export class VoteService {
         throw error;
       }
 
-      const [participants, voted] = await Promise.all([
-        this.rooms.listParticipants(locked.roomId),
+      // 참가자 수는 개수만 있으면 되므로 같은 트랜잭션의 manager 로 센다 —
+      // rooms.listParticipants (기본 레포) 로 커넥션을 하나 더 꺼내면, 풀이
+      // 전부 cast 트랜잭션에 잡혔을 때 아무도 두 번째 커넥션을 못 얻어
+      // 전원이 멈춘다. 락 안에서 같은 커넥션으로 읽어 정합성도 보장한다.
+      const [participantCount, voted] = await Promise.all([
+        manager.count(Participant, { where: { roomId: locked.roomId } }),
         manager.count(Vote, { where: { roundId: locked.id } }),
       ]);
 
-      const allVoted = voted >= participants.length;
+      const allVoted = voted >= participantCount;
       if (allVoted) {
         locked.votingClosedAt = new Date();
         await manager.save(Round, locked);

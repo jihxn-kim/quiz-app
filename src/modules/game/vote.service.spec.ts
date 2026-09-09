@@ -7,7 +7,6 @@ import { Participant } from './entities/participant.entity';
 import { Round } from './entities/round.entity';
 import { Vote } from './entities/vote.entity';
 import { RoundStatus } from './enums/round-status.enum';
-import { RoomService } from './room.service';
 import { VoteService } from './vote.service';
 
 const revealedRound = (over: Partial<Round> = {}): Round =>
@@ -18,7 +17,6 @@ describe('VoteService', () => {
   const voteRepo = { find: jest.fn(), findOne: jest.fn(), count: jest.fn() };
   const manager = { findOne: jest.fn(), save: jest.fn(), count: jest.fn() };
   const dataSource = { transaction: jest.fn((cb: (m: typeof manager) => unknown) => cb(manager)) };
-  const rooms = { listParticipants: jest.fn() };
   const roundRepo = { findOne: jest.fn(), update: jest.fn() };
 
   beforeEach(async () => {
@@ -30,7 +28,6 @@ describe('VoteService', () => {
         { provide: getRepositoryToken(Vote), useValue: voteRepo },
         { provide: getRepositoryToken(Round), useValue: roundRepo },
         { provide: DataSource, useValue: dataSource },
-        { provide: RoomService, useValue: rooms },
       ],
     }).compile();
     service = moduleRef.get(VoteService);
@@ -81,7 +78,6 @@ describe('VoteService', () => {
         .mockResolvedValueOnce(revealedRound())
         .mockResolvedValueOnce({ id: '77', roundId: '10' } as Answer)
         .mockResolvedValueOnce(null);
-      rooms.listParticipants.mockResolvedValue([{ id: '1' }, { id: '2' }]);
       manager.count.mockResolvedValue(2);
 
       const result = await service.cast(revealedRound(), { id: '2', roomId: '1' } as Participant, '77');
@@ -98,8 +94,7 @@ describe('VoteService', () => {
         .mockResolvedValueOnce(revealedRound())
         .mockResolvedValueOnce({ id: '77', roundId: '10' } as Answer)
         .mockResolvedValueOnce(null);
-      rooms.listParticipants.mockResolvedValue([{ id: '1' }, { id: '2' }, { id: '3' }]);
-      manager.count.mockResolvedValue(2);
+      manager.count.mockResolvedValueOnce(3).mockResolvedValueOnce(2);
 
       const result = await service.cast(revealedRound(), { id: '2', roomId: '1' } as Participant, '77');
 
@@ -117,6 +112,21 @@ describe('VoteService', () => {
       await expect(
         service.cast(revealedRound(), { id: '2', roomId: '1' } as Participant, '77'),
       ).rejects.toBeInstanceOf(ConflictException);
+    });
+
+    it('라운드를 비관적 쓰기 락으로 잠근다', async () => {
+      manager.findOne
+        .mockResolvedValueOnce(revealedRound())
+        .mockResolvedValueOnce({ id: '77', roundId: '10' } as Answer)
+        .mockResolvedValueOnce(null);
+      manager.count.mockResolvedValue(1);
+
+      await service.cast(revealedRound(), { id: '2', roomId: '1' } as Participant, '77');
+
+      expect(manager.findOne).toHaveBeenCalledWith(
+        Round,
+        expect.objectContaining({ lock: { mode: 'pessimistic_write' } }),
+      );
     });
   });
 
