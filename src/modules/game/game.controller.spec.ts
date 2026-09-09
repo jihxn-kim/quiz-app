@@ -385,6 +385,50 @@ describe('GameController', () => {
     expect(rounds.findLatest).not.toHaveBeenCalled();
   });
 
+  /**
+   * 방 응답의 currentRound 는 클라이언트가 "지금 무엇을 폴링해야 하는가"를
+   * 정하는 유일한 근거다. 공개된 라운드는 투표가 닫힐 때까지 계속 변하므로,
+   * 투표 종료 여부를 이 요약에 실어야 클라이언트가 라운드 폴링을 언제
+   * 멈춰야 하는지 알 수 있다. 득표 수는 여기 실리지 않는다.
+   */
+  it('getRoom: 투표가 진행 중이면 currentRound.votingClosedAt 이 null 이다', async () => {
+    rooms.findByCode.mockResolvedValue({
+      id: '1', code: 'K3P9XM', status: 'playing', hostParticipantId: '1',
+    } as Room);
+    rooms.listParticipants.mockResolvedValue([{ id: '1', nickname: '지훈' }]);
+    rounds.findLatest.mockResolvedValue({
+      id: '10', sequence: 3, status: RoundStatus.REVEALED, votingClosedAt: null,
+    } as Round);
+
+    const result = await controller.getRoom('K3P9XM', { id: '1', roomId: '1' } as Participant);
+
+    expect(result.currentRound).toEqual({
+      id: '10', sequence: 3, status: 'revealed', votingClosedAt: null,
+    });
+  });
+
+  it('getRoom: 투표가 끝났으면 currentRound.votingClosedAt 에 그 시각이 실린다', async () => {
+    rooms.findByCode.mockResolvedValue({
+      id: '1', code: 'K3P9XM', status: 'playing', hostParticipantId: '1',
+    } as Room);
+    rooms.listParticipants.mockResolvedValue([{ id: '1', nickname: '지훈' }]);
+    rounds.findLatest.mockResolvedValue({
+      id: '10',
+      sequence: 3,
+      status: RoundStatus.REVEALED,
+      votingClosedAt: new Date('2026-09-09T12:35:10.000Z'),
+    } as Round);
+
+    const result = await controller.getRoom('K3P9XM', { id: '1', roomId: '1' } as Participant);
+
+    expect(result.currentRound).toEqual({
+      id: '10',
+      sequence: 3,
+      status: 'revealed',
+      votingClosedAt: '2026-09-09T12:35:10.000Z',
+    });
+  });
+
   it('createRoom: 정상 경로 응답 모양', async () => {
     rooms.create.mockResolvedValue({
       room: { id: '1', code: 'K3P9XM' } as Room,
