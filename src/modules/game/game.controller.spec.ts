@@ -1,4 +1,4 @@
-import { ForbiddenException } from '@nestjs/common';
+import { ConflictException, ForbiddenException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Question } from 'src/modules/questions/entities/question.entity';
@@ -313,6 +313,62 @@ describe('GameController', () => {
     ).rejects.toThrow(ForbiddenException);
 
     expect(rounds.skip).not.toHaveBeenCalled();
+  });
+
+  it('closeVoting: 방장이 아니면 거부되고 투표를 닫지 않는다', async () => {
+    const round = { id: '11', roomId: '1', questionId: '42', status: RoundStatus.REVEALED } as Round;
+    rounds.findById.mockResolvedValue(round);
+    rooms.findById.mockResolvedValue({ id: '1', hostParticipantId: '1' } as Room);
+    rooms.assertHost.mockImplementation(() => {
+      throw new ForbiddenException('방장만 할 수 있습니다');
+    });
+
+    await expect(
+      controller.closeVoting('11', { id: '2', roomId: '1' } as Participant),
+    ).rejects.toThrow(ForbiddenException);
+
+    expect(votes.close).not.toHaveBeenCalled();
+  });
+
+  it('closeVoting: 공개되지 않은 라운드면 거부된다', async () => {
+    // VoteService.close 가 REVEALED 가 아니면 던지는 걸 그대로 흘려보내야
+    // 한다. 예전엔 여기서 검사가 없어 open/skipped 라운드에서도 강제 종료가
+    // 통과했고, votingClosedAt 만 찍혀 이후 투표가 영영 막혔다.
+    const round = {
+      id: '11', roomId: '1', questionId: '42', status: RoundStatus.OPEN, votingClosedAt: null,
+    } as Round;
+    rounds.findById.mockResolvedValue(round);
+    rooms.findById.mockResolvedValue({ id: '1', hostParticipantId: '1' } as Room);
+    votes.close.mockRejectedValue(new ConflictException('아직 공개되지 않은 라운드입니다'));
+
+    await expect(
+      controller.closeVoting('11', { id: '1', roomId: '1' } as Participant),
+    ).rejects.toThrow(ConflictException);
+  });
+
+  it('castVote: 정상 경로 응답 모양', async () => {
+    const round = { id: '11', roomId: '1', questionId: '42', status: RoundStatus.REVEALED } as Round;
+    rounds.findById.mockResolvedValue(round);
+    votes.cast.mockResolvedValue({ voted: true, allVoted: false });
+
+    const result = await controller.castVote(
+      '11',
+      { answerId: '77' },
+      { id: '1', roomId: '1' } as Participant,
+    );
+
+    expect(result).toEqual({ voted: true, allVoted: false });
+    expect(votes.cast).toHaveBeenCalledWith(round, { id: '1', roomId: '1' }, '77');
+  });
+
+  it('castVote: 다른 방 참가자면 거부된다 (VoteService.cast 가 직접 검사한다)', async () => {
+    const round = { id: '11', roomId: '1', questionId: '42', status: RoundStatus.REVEALED } as Round;
+    rounds.findById.mockResolvedValue(round);
+    votes.cast.mockRejectedValue(new ForbiddenException('이 방의 참가자가 아닙니다'));
+
+    await expect(
+      controller.castVote('11', { answerId: '77' }, { id: '99', roomId: '2' } as Participant),
+    ).rejects.toThrow(ForbiddenException);
   });
 
   it('getRoom: 다른 방 참가자면 거부되고 방 정보를 조회하지 않는다', async () => {

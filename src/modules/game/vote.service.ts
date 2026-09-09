@@ -111,10 +111,22 @@ export class VoteService {
   /**
    * 방장이 투표를 강제 종료한다. 조건부 UPDATE 라 이미 닫힌 라운드를
    * 다시 닫거나 시각을 덮어쓰지 않는다.
+   *
+   * 공개되지 않은 라운드(open/skipped)에서 이걸 부르면 votingClosedAt 만
+   * 찍히고 라운드는 영영 투표를 못 받는 상태가 된다 — 이후 전원 제출로
+   * 자동 공개돼도 cast() 가 "투표가 이미 끝났습니다"로 모든 표를 막고,
+   * 되돌릴 방법(재오픈 엔드포인트)이 없다. 그래서 REVEALED 가 아니면
+   * 거부한다. 넘어온 round 는 락 밖에서 읽은 값이라 오래됐을 수 있으니
+   * 이 검사만 믿지 않고, 원자적 UPDATE 의 where 절에도 상태 조건을 같이
+   * 걸어 그 사이에 바뀐 라운드에 쓰기가 들어가지 않게 한다.
    */
   async close(round: Round): Promise<Round> {
+    if (round.status !== RoundStatus.REVEALED) {
+      throw new ConflictException('아직 공개되지 않은 라운드입니다');
+    }
+
     const result = await this.rounds.update(
-      { id: round.id, votingClosedAt: IsNull() },
+      { id: round.id, status: RoundStatus.REVEALED, votingClosedAt: IsNull() },
       { votingClosedAt: new Date() },
     );
     if (result.affected === 0) {

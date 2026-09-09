@@ -493,7 +493,7 @@ export class GameController {
 | 상태 | 이유 |
 | --- | --- |
 | 403 | 방장이 아님 |
-| 409 | 투표가 이미 끝남 |`,
+| 409 | 아직 공개되지 않음 / 투표가 이미 끝남 |`,
   })
   @ApiOkResponse({ type: RoundRevealedResponseDto })
   async closeVoting(

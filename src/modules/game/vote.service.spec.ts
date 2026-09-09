@@ -131,6 +131,14 @@ describe('VoteService', () => {
   });
 
   describe('close', () => {
+    it('공개되지 않은 라운드면 409', async () => {
+      await expect(
+        service.close(revealedRound({ status: RoundStatus.OPEN })),
+      ).rejects.toBeInstanceOf(ConflictException);
+      // 상태 검사에서 바로 거부돼야 한다 — UPDATE 까지 가면 안 된다.
+      expect(roundRepo.update).not.toHaveBeenCalled();
+    });
+
     it('이미 닫혔으면 409', async () => {
       roundRepo.update.mockResolvedValue({ affected: 0 });
       await expect(service.close(revealedRound())).rejects.toBeInstanceOf(ConflictException);
