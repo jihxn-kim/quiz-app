@@ -16,6 +16,7 @@ describe('ReviewCommand', () => {
   const review = {
     approve: jest.fn(),
     reject: jest.fn(),
+    publish: jest.fn(),
     listPending: jest.fn(),
     countApproved: jest.fn(),
   };
@@ -83,5 +84,31 @@ describe('ReviewCommand', () => {
     ).rejects.toThrow('검수 대기 상태가 아닙니다');
 
     expect(loggerLogSpy).not.toHaveBeenCalledWith(expect.stringContaining('승인:'));
+  });
+
+  it('--publish 는 쉼표로 구분된 id 들을 배포한다', async () => {
+    await command.run([], { publish: '3,7,11', reviewer: 'jihun' });
+    expect(review.publish).toHaveBeenCalledWith(['3', '7', '11']);
+  });
+
+  it('--publish 는 공백을 무시한다', async () => {
+    await command.run([], { publish: ' 3 , 7 ', reviewer: 'jihun' });
+    expect(review.publish).toHaveBeenCalledWith(['3', '7']);
+  });
+
+  it('--publish 에 숫자가 아닌 id 가 섞여 있으면 DB 로 보내지 않고 먼저 걸러서 에러를 던진다', async () => {
+    await expect(
+      command.run([], { publish: '3,abc,7', reviewer: 'jihun' }),
+    ).rejects.toThrow('잘못된 id: abc');
+
+    expect(review.publish).not.toHaveBeenCalled();
+  });
+
+  it('--publish 가 공백뿐이라 배포 대상이 없으면 성공 로그를 찍지 않고 안내만 한다', async () => {
+    await command.run([], { publish: '   ', reviewer: 'jihun' });
+
+    expect(review.publish).not.toHaveBeenCalled();
+    expect(loggerLogSpy).toHaveBeenCalledWith('배포할 id 가 없습니다');
+    expect(loggerLogSpy).not.toHaveBeenCalledWith(expect.stringContaining('0건이 live'));
   });
 });

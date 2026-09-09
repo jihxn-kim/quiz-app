@@ -9,7 +9,8 @@
     "cli": "ts-node -r tsconfig-paths/register src/cli.ts",
     "test": "jest",
     "test:watch": "jest --watch",
-    "test:safety": "jest --testRegex='.*\\.e2e-spec\\.ts$'",
+    "test:safety": "jest --testRegex='test/safety-regression\\.e2e-spec\\.ts$'",
+    "test:game": "jest --testRegex='test/game-flow\\.e2e-spec\\.ts$'",
     "typeorm": "typeorm-ts-node-commonjs -d src/infrastructure/database/data-source.ts"
   },
   "dependencies": {

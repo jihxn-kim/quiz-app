@@ -1,5 +1,6 @@
 import { Test } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
+import { DataSource, In } from 'typeorm';
 import { Question } from 'src/modules/questions/entities/question.entity';
 import { QuestionStatus } from 'src/modules/questions/enums/question-status.enum';
 import { ReviewService, AUTO_APPROVE_THRESHOLD, AUTO_APPROVE_MIN_APPROVED } from './review.service';
@@ -15,11 +16,25 @@ const question = (overrides: Partial<Question> = {}) =>
 describe('ReviewService', () => {
   let service: ReviewService;
   const repo = { find: jest.fn(), update: jest.fn(), count: jest.fn() };
+  // publish() 는 dataSource.transaction() 이 넘겨주는 manager 로 작업한다.
+  // 실제 트랜잭션처럼, transaction() 콜백 안에서 던진 에러는 그대로 밖으로
+  // 전파되게 해서(진짜 롤백과 같은 관찰 가능한 동작) 목이 실제 동작과 어긋나지 않게 한다.
+  const manager = { find: jest.fn(), update: jest.fn() };
+  const dataSource = {
+    transaction: jest.fn((cb: (manager: unknown) => Promise<unknown>) => cb(manager)),
+  };
 
   beforeEach(async () => {
     jest.resetAllMocks();
+    dataSource.transaction.mockImplementation((cb: (manager: unknown) => Promise<unknown>) =>
+      cb(manager),
+    );
     const moduleRef = await Test.createTestingModule({
-      providers: [ReviewService, { provide: getRepositoryToken(Question), useValue: repo }],
+      providers: [
+        ReviewService,
+        { provide: getRepositoryToken(Question), useValue: repo },
+        { provide: DataSource, useValue: dataSource },
+      ],
     }).compile();
     service = moduleRef.get(ReviewService);
   });
@@ -121,6 +136,73 @@ describe('ReviewService', () => {
       repo.update.mockResolvedValue({ affected: 0, raw: [], generatedMaps: [] });
 
       await expect(service.reject('999', 'jihun', '사유')).rejects.toThrow('999');
+    });
+  });
+
+  describe('publish', () => {
+    it('approved 상태인 질문만 배포 대상으로 삼아 live 로 바꾼다', async () => {
+      manager.find.mockResolvedValue([{ id: '3' }, { id: '7' }]);
+      manager.update.mockResolvedValue({ affected: 2, raw: [], generatedMaps: [] });
+
+      await service.publish(['3', '7']);
+
+      expect(manager.find).toHaveBeenCalledWith(
+        Question,
+        expect.objectContaining({
+          where: { id: In(['3', '7']), status: QuestionStatus.APPROVED },
+        }),
+      );
+      expect(manager.update).toHaveBeenCalledWith(
+        Question,
+        { id: In(['3', '7']) },
+        { status: QuestionStatus.LIVE },
+      );
+    });
+
+    it('중복 id 를 넘겨도 고유 id 로만 조회·갱신하고 성공한다', async () => {
+      manager.find.mockResolvedValue([{ id: '3' }, { id: '7' }]);
+      manager.update.mockResolvedValue({ affected: 2, raw: [], generatedMaps: [] });
+
+      await expect(service.publish(['3', '3', '7'])).resolves.toBeUndefined();
+
+      expect(manager.find).toHaveBeenCalledWith(
+        Question,
+        expect.objectContaining({
+          where: { id: In(['3', '7']), status: QuestionStatus.APPROVED },
+        }),
+      );
+      expect(manager.update).toHaveBeenCalledWith(
+        Question,
+        { id: In(['3', '7']) },
+        { status: QuestionStatus.LIVE },
+      );
+    });
+
+    // 이 테스트의 이름은 이제 실제로 참이다: manager.update 가 아예 호출되지
+    // 않았음을 단언하는 것이 "아무것도 안 바뀜"의 실제 증거다. (수정 전에는
+    // 목 repo.update 가 상태를 바꾸지 않아서 "아무것도 안 바뀜"과 "유효한
+    // 것만 바뀜"을 구분하지 못했다 — 실제로는 22·23 같은 유효한 id 가 먼저
+    // live 로 바뀐 뒤에야 예외가 던져졌다.)
+    it('요청한 id 중 일부가 approved 상태가 아니면 에러를 던지고 아무것도 live 로 올리지 않는다', async () => {
+      manager.find.mockResolvedValue([{ id: '3' }, { id: '7' }]);
+
+      await expect(service.publish(['3', '7', '999'])).rejects.toThrow(
+        '승인(approved) 상태가 아닌 질문이 있어 아무것도 배포하지 않았습니다: 999',
+      );
+
+      expect(manager.update).not.toHaveBeenCalled();
+    });
+
+    it('문제가 된 id 를 에러 메시지에 그대로 담는다', async () => {
+      manager.find.mockResolvedValue([{ id: '3' }]);
+
+      await expect(service.publish(['3', '7', '999'])).rejects.toThrow(/7, 999/);
+    });
+
+    it('빈 배열이면 트랜잭션을 시작하지 않는다', async () => {
+      await service.publish([]);
+
+      expect(dataSource.transaction).not.toHaveBeenCalled();
     });
   });
 });

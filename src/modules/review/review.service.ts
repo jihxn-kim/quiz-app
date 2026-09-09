@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 import { Question } from 'src/modules/questions/entities/question.entity';
 import { QuestionStatus } from 'src/modules/questions/enums/question-status.enum';
 
@@ -13,6 +13,7 @@ export class ReviewService {
   constructor(
     @InjectRepository(Question)
     private readonly questions: Repository<Question>,
+    private readonly dataSource: DataSource,
   ) {}
 
   /**
@@ -91,9 +92,29 @@ export class ReviewService {
     }
   }
 
-  /** 승인된 질문을 서빙 대상으로 올린다. 형식/소재 균형은 호출자가 정한다. */
+  /**
+   * approve 와 동일한 이유로 approved 상태에만 배포를 적용한다. 대상 id 중
+   * 하나라도 approved 상태가 아니면(존재하지 않거나 이미 처리됨) 트랜잭션을
+   * 롤백해서 요청한 id 중 어느 것도 live 로 바뀌지 않고 에러를 던진다 —
+   * all-or-nothing.
+   */
   async publish(ids: string[]): Promise<void> {
-    if (ids.length === 0) return;
-    await this.questions.update(ids, { status: QuestionStatus.LIVE });
+    const uniqueIds = [...new Set(ids)];
+    if (uniqueIds.length === 0) return;
+
+    await this.dataSource.transaction(async (manager) => {
+      const approved = await manager.find(Question, {
+        where: { id: In(uniqueIds), status: QuestionStatus.APPROVED },
+        select: { id: true },
+      });
+      if (approved.length !== uniqueIds.length) {
+        const approvedIds = new Set(approved.map((q) => q.id));
+        const bad = uniqueIds.filter((id) => !approvedIds.has(id));
+        throw new Error(
+          `승인(approved) 상태가 아닌 질문이 있어 아무것도 배포하지 않았습니다: ${bad.join(', ')}`,
+        );
+      }
+      await manager.update(Question, { id: In(uniqueIds) }, { status: QuestionStatus.LIVE });
+    });
   }
 }
